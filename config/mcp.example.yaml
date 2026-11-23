@@ -1,0 +1,20 @@
+# 复制为 config/mcp.yaml 后按需修改。
+servers:
+  filesystem:
+    transport: stdio
+    command: npx
+    args: ["-y", "@modelcontextprotocol/server-filesystem", "${WORKSPACE}"]
+    env:
+      NODE_NO_WARNINGS: "1"
+    approval: ask        # auto | ask | deny；deny 不连接也不注册工具
+    timeout: 30s         # initialize + tools/list 的启动超时
+    call_timeout: 60s    # 单次 tools/call 超时
+
+  # remote:
+  #   transport: http
+  #   url: https://example.com/mcp
+  #   headers:
+  #     Authorization: Bearer ${MCP_TOKEN}
+  #   approval: auto     # 仅 readOnlyHint=true 且非破坏性的工具免审批
+  #   timeout: 30s
+  #   call_timeout: 60s

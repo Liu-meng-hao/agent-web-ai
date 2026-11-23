@@ -1,0 +1,2 @@
+# golden 文件按 LF 存储，避免 Windows 用 CRLF 检出导致测试失败。
+*.golden text eol=lf

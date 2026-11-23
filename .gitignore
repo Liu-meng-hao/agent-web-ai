@@ -1,0 +1,18 @@
+# 运行时状态（会话、记忆、页面、日志）全部忽略
+/data/
+
+# 本地环境变量
+.env
+
+# 构建产物
+/bin/
+*.exe
+*.test
+*.out
+
+# Go 本地缓存（沙箱内把 GOCACHE / GOMODCACHE 重定向到工作区）
+/.gocache/
+/.gopath/
+
+# 临时文件
+/.tmp/

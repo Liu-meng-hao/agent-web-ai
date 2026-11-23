@@ -1,0 +1,163 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>设计系统画廊</title>
+  <link rel="stylesheet" href="/a/_shared/tokens.css">
+  <link rel="stylesheet" href="/a/_shared/base.css">
+</head>
+<body>
+  <main class="page stack">
+    <header class="hero stack">
+      <p class="eyebrow">Design System</p>
+      <h1>组件与图表画廊</h1>
+      <p class="lead">这是本地设计系统的参考页。生成成品时把需要的 CSS 与 SVG 图表内联进单文件 HTML，不要直接引用本页路径。</p>
+      <div class="row">
+        <span class="badge badge--accent">无外链</span>
+        <span class="badge">响应式</span>
+        <span class="badge">可打印</span>
+        <span class="badge">暗色适配</span>
+      </div>
+    </header>
+
+    <section class="card stack">
+      <h2>先选页面类型，再套结构</h2>
+      <p class="muted small">数据看板只是其中一种。下面按「数据看板 / 落地页 / 文章与文档 / 表单」给出示例，按内容选择，不要默认做成 KPI + 图表。</p>
+      <div class="grid grid--4">
+        <article class="card"><h3>数据看板</h3><p class="small muted">有可量化数据、需要比较/趋势/占比时使用。</p></article>
+        <article class="card"><h3>落地页</h3><p class="small muted">单一目标：价值主张 + 行动按钮 + 证明。</p></article>
+        <article class="card"><h3>文章/文档</h3><p class="small muted">窄栏排版，层级清晰，图表按需。</p></article>
+        <article class="card"><h3>表单/工具</h3><p class="small muted">字段分组、提示与错误状态、明确提交。</p></article>
+      </div>
+    </section>
+
+    <section class="stack">
+      <p class="eyebrow">Data dashboard</p>
+      <h2>数据看板（按需）</h2>
+      <p class="muted small">只有存在真实数据且需要趋势、对比或占比时才使用图表；没有数据时不要编造。</p>
+    </section>
+
+    <section class="grid grid--4">
+      <article class="card"><p class="card__label">本月收入</p><p class="card__value">¥ 128.4 万</p><p class="small muted">环比 +12.6%</p></article>
+      <article class="card"><p class="card__label">活跃用户</p><p class="card__value">24,860</p><p class="small muted">周同比 +4.2%</p></article>
+      <article class="card"><p class="card__label">转化率</p><p class="card__value">3.82%</p><p class="small muted">目标 4.0%</p></article>
+      <article class="card"><p class="card__label">待处理</p><p class="card__value">17</p><p class="small muted">其中 3 项高优</p></article>
+    </section>
+
+    <section class="grid grid--2">
+      <article class="card">
+        <h2>柱状图</h2>
+        <div id="bar" class="chart"></div>
+      </article>
+      <article class="card">
+        <h2>折线图</h2>
+        <div id="line" class="chart"></div>
+      </article>
+      <article class="card">
+        <h2>环形图</h2>
+        <div id="donut" class="chart"></div>
+      </article>
+      <article class="card stack">
+        <h2>表格与徽章</h2>
+        <div class="row">
+          <span class="badge badge--accent">已完成</span>
+          <span class="badge badge--warn">待确认</span>
+          <span class="badge badge--danger">阻塞</span>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>渠道</th><th class="num">访问</th><th class="num">转化</th></tr></thead>
+            <tbody>
+              <tr><td>自然搜索</td><td class="num">12,480</td><td class="num">4.6%</td></tr>
+              <tr><td>直接访问</td><td class="num">8,210</td><td class="num">3.1%</td></tr>
+              <tr><td>推荐链接</td><td class="num">3,940</td><td class="num">2.7%</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </article>
+    </section>
+
+    <section class="card stack">
+      <h2>提示块</h2>
+      <div class="callout">默认提示：用于强调结论或下一步。</div>
+      <div class="callout callout--warn">警告提示：说明风险或待确认事项。</div>
+      <div class="callout callout--danger">危险提示：说明阻塞或不可逆操作。</div>
+    </section>
+
+    <section class="stack landing">
+      <p class="eyebrow">Landing page</p>
+      <h2>落地页</h2>
+      <p class="lead">首屏只讲一件事：用户能得到什么。标题 + 一句解释 + 一个主按钮，下面再放功能与证明。</p>
+      <div class="landing__actions">
+        <a class="btn btn--primary" href="#">开始使用</a>
+        <a class="btn btn--ghost" href="#">了解详情</a>
+      </div>
+      <div class="grid grid--3">
+        <article class="card"><h3 class="feature__title">清晰的目标</h3><p class="small muted">每个区块都服务于同一个转化目标，不堆无关信息。</p></article>
+        <article class="card"><h3 class="feature__title">可验证的证明</h3><p class="small muted">用案例、数据或引用支撑主张；没有依据就不写。</p></article>
+        <article class="card"><h3 class="feature__title">明确的下一步</h3><p class="small muted">主按钮始终可见，次级动作弱化处理。</p></article>
+      </div>
+    </section>
+
+    <section class="stack">
+      <p class="eyebrow">Article</p>
+      <h2>文章与文档</h2>
+      <article class="prose">
+        <h3>窄栏更适合长文阅读</h3>
+        <p>正文限制在 68 个字符宽度左右，段落之间留出节奏。标题层级只表达结构，不用来放大字号。</p>
+        <blockquote>引用、结论或风险提示用引用块单独强调，避免整段加粗。</blockquote>
+        <ul>
+          <li>代码、路径、命令用等宽字体。</li>
+          <li>步骤类内容用有序列表。</li>
+          <li>没有数据支撑时不要插入图表。</li>
+        </ul>
+      </article>
+    </section>
+
+    <section class="stack">
+      <p class="eyebrow">Form</p>
+      <h2>表单与工具</h2>
+      <form class="form" onsubmit="return false">
+        <div class="field">
+          <label for="demo-name">名称</label>
+          <input id="demo-name" type="text" placeholder="例如：销售周报">
+          <p class="field__hint">用于页面标题与预览列表。</p>
+        </div>
+        <div class="field">
+          <label for="demo-email">邮箱</label>
+          <input id="demo-email" type="email" placeholder="you@example.com">
+          <p class="field__error">示例：请输入有效的邮箱地址。</p>
+        </div>
+        <div class="field">
+          <label for="demo-note">备注</label>
+          <textarea id="demo-note" rows="3" placeholder="补充说明（可选）"></textarea>
+        </div>
+        <div class="form__actions">
+          <button class="btn btn--primary" type="submit">提交</button>
+          <button class="btn btn--ghost" type="reset">重置</button>
+        </div>
+      </form>
+    </section>
+
+    <footer class="footer">agent design system · 仅作为结构与样式参考</footer>
+  </main>
+  <script src="/a/_shared/charts.js"></script>
+  <script>
+    Charts.bar("#bar", [
+      { label: "一月", value: 42 }, { label: "二月", value: 58 },
+      { label: "三月", value: 51 }, { label: "四月", value: 73 },
+      { label: "五月", value: 88 }, { label: "六月", value: 96 }
+    ]);
+    Charts.line("#line", [
+      { label: "周一", value: 12 }, { label: "周二", value: 18 },
+      { label: "周三", value: 15 }, { label: "周四", value: 24 },
+      { label: "周五", value: 31 }, { label: "周六", value: 27 }
+    ]);
+    Charts.donut("#donut", [
+      { label: "自然搜索", value: 52 }, { label: "直接访问", value: 28 },
+      { label: "推荐链接", value: 20 }
+    ], { center: "100%", caption: "流量来源" });
+  </script>
+</body>
+</html>

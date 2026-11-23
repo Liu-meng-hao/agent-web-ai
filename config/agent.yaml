@@ -1,0 +1,70 @@
+models:
+  main:
+    provider: openai
+    base_url: "https://infistar.cc/v1"
+    api_key: "${AGENT_API_KEY}"
+    model: deepseek-v4.1-flash
+    window: 131072
+    # 推理模型的思考 token 也算在 max_tokens 里，8192 在生成大页面时会被思考吃光。
+    max_tokens: 16384
+  summarizer:
+    provider: openai
+    base_url: "https://infistar.cc/v1"
+    api_key: "${AGENT_API_KEY}"
+    model: deepseek-v4.1-flash
+    max_tokens: 4096
+  extractor:
+    provider: openai
+    base_url: "https://infistar.cc/v1"
+    api_key: "${AGENT_API_KEY}"
+    model: deepseek-v4.1-flash
+    max_tokens: 2048
+
+agent:
+  max_steps: 48
+  approval: standard        # readonly | standard | yolo
+  workspace: data/workspace
+  auto_extract: true
+
+context:
+  output_reserve: 8000
+  safety: 0.1
+  compact_at: 0.75
+
+memory:
+  root: data/memory
+  top_k: 12
+  token_budget: 2000
+  decay_days: 90
+
+skills:
+  root: skills                  # 项目级技能目录
+  user_root: "~/.agent/skills"  # 用户级技能目录，同名时项目优先
+  max_body_tokens: 8000         # skill_load 单次返回上限
+  max_catalog_tokens: 800       # 注入 system prompt 的技能目录上限
+
+shell:
+  default: bash             # bash | pwsh | cmd；找不到按此顺序回退
+  bash_path: ""             # 可选：Git Bash 的 bash.exe 绝对路径
+  pass_env: []
+  timeout_default: 120s
+
+artifact:
+  root: data/artifacts
+  self_check: true
+  max_file_kb: 200
+
+ui:
+  theme: dark               # dark | light | auto
+  stream_debounce_ms: 80
+  show_reasoning: false
+
+preview:
+  enabled: true
+  addr: 127.0.0.1:4318
+  auto_open: false
+
+session:
+  root: data/sessions
+  keep_days: 30
+  sync_each_tool: true

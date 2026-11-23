@@ -1,0 +1,7 @@
+# 模型单价：每百万 token 的价格，货币见 currency。
+# 未在这里列出的模型成本按 0 计，不影响对话与工具调用。
+currency: CNY
+models:
+  deepseek-chat:
+    input: 2.0
+    output: 8.0
