@@ -5,6 +5,7 @@ import (
 	"crypto/sha1"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"os"
@@ -49,6 +50,9 @@ const (
 	StatusSuperseded = "superseded"
 	StatusArchived   = "archived"
 )
+
+// ErrLocked 表示记忆库已被另一个进程以写模式占用。
+var ErrLocked = errors.New("记忆库正在被另一个进程使用")
 
 // Source 记录事实来自哪个会话的哪一轮。
 type Source struct {
@@ -192,7 +196,7 @@ func Open(root string) (*Store, error) {
 		return nil, fmt.Errorf("锁定记忆库失败: %w", err)
 	}
 	if !ok {
-		return nil, fmt.Errorf("记忆库正在被另一个进程使用")
+		return nil, ErrLocked
 	}
 
 	s := &Store{dir: root, lock: lk, facts: map[string]*Fact{}}
@@ -230,6 +234,58 @@ func OpenReadOnly(root string) (*Store, error) {
 	}
 	s.rebuildIndex()
 	return s, nil
+}
+
+// ReadOnly 报告当前视图是否为只读（未持有写锁）。
+func (s *Store) ReadOnly() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.readOnly
+}
+
+// Upgrade 在只读视图上重新尝试获取写锁，成功后切换为可写并重载最新事实。
+func (s *Store) Upgrade() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.readOnly {
+		return nil
+	}
+	if err := os.MkdirAll(s.dir, 0o755); err != nil {
+		return fmt.Errorf("创建记忆目录失败: %w", err)
+	}
+	lk := flock.New(filepath.Join(s.dir, lockFile))
+	ok, err := lk.TryLock()
+	if err != nil {
+		return fmt.Errorf("锁定记忆库失败: %w", err)
+	}
+	if !ok {
+		return ErrLocked
+	}
+
+	// 持锁后重新载入，避免沿用只读快照、漏掉其他进程刚写入的事实。
+	tmp := &Store{dir: s.dir, facts: map[string]*Fact{}, readOnly: true}
+	if err := tmp.load(); err != nil {
+		_ = lk.Unlock()
+		return err
+	}
+	f, err := os.OpenFile(filepath.Join(s.dir, factsFile), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		_ = lk.Unlock()
+		return err
+	}
+
+	s.facts, s.order = tmp.facts, tmp.order
+	s.manual, s.manualFound = tmp.manual, tmp.manualFound
+	s.f, s.lock = f, lk
+	s.readOnly = false
+	if err := s.syncManualIfFound(); err != nil {
+		_ = f.Close()
+		s.f, s.lock = nil, nil
+		s.readOnly = true
+		return err
+	}
+	s.rebuildIndex()
+	return nil
 }
 
 // Close 释放锁。
@@ -364,11 +420,137 @@ func (s *Store) Write(f Fact) (Fact, bool, error) {
 	return f, true, nil
 }
 
+// UpdateInput 描述一次记忆修正。
+//
+// OldText 是修正前的当前值，用于确认调用方看到的就是即将被改的那条；
+// Tags 为 nil 表示保留原标签，Confidence <= 0 表示保留原置信度。
+type UpdateInput struct {
+	Key        string
+	Scope      string
+	OldText    string
+	NewText    string
+	Tags       []string
+	Confidence float64
+	SessionID  string
+}
+
+// Lookup 按 scope + key 定位一条活跃事实（只读），供审批预览与修正共用。
+func (s *Store) Lookup(key, scope, sessionID string) (Fact, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.lookupLocked(key, scope, sessionID)
+}
+
+func (s *Store) lookupLocked(key, scope, sessionID string) (Fact, error) {
+	key = NormalizeKey(key)
+	if key == "" {
+		return Fact{}, fmt.Errorf("key 不能为空")
+	}
+	if scope == "" {
+		scope = ScopeProject
+	}
+	if scope == ScopeSession && sessionID == "" {
+		return Fact{}, fmt.Errorf("session 作用域需要会话上下文")
+	}
+
+	var matches []Fact
+	for _, id := range s.order {
+		f := s.facts[id]
+		if f == nil || f.Status != StatusActive || f.Scope != scope || f.Key != key {
+			continue
+		}
+		if scope == ScopeSession && f.Source.Session != sessionID {
+			continue
+		}
+		matches = append(matches, *f)
+	}
+	switch len(matches) {
+	case 0:
+		return Fact{}, fmt.Errorf("没有找到 key %q（scope=%s）；新事实请用 memory_write", key, scope)
+	case 1:
+		return matches[0], nil
+	default:
+		sort.Slice(matches, func(i, j int) bool { return matches[i].ID < matches[j].ID })
+		ids := make([]string, 0, 3)
+		for i, m := range matches {
+			if i >= 3 {
+				ids = append(ids, "…")
+				break
+			}
+			ids = append(ids, m.ID)
+		}
+		return Fact{}, fmt.Errorf("key %q 匹配到 %d 条活跃事实（%s），请先修复数据", key, len(matches), strings.Join(ids, ", "))
+	}
+}
+
+// Update 修正一条已有 key 的事实，保留 id 与历史快照。
+//
+// changed=false 表示新值与当前值一致，没有写盘。
+func (s *Store) Update(in UpdateInput) (Fact, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.f == nil {
+		return Fact{}, false, fmt.Errorf("记忆库为只读模式")
+	}
+	if err := s.reloadManual(); err != nil {
+		return Fact{}, false, err
+	}
+
+	cur, err := s.lookupLocked(in.Key, in.Scope, in.SessionID)
+	if err != nil {
+		return Fact{}, false, err
+	}
+	if cur.Origin == OriginManual {
+		return Fact{}, false, fmt.Errorf("key %q 由 MEMORY.md 手工区维护，请直接修改该文件", cur.Key)
+	}
+
+	oldText := strings.TrimSpace(in.OldText)
+	if oldText == "" {
+		return Fact{}, false, fmt.Errorf("old 不能为空：修正必须带上当前值")
+	}
+	if strings.TrimSpace(cur.Text) != oldText {
+		return Fact{}, false, fmt.Errorf("旧值不匹配：key %q 的当前内容是 %q；请重新读取后再修正", cur.Key, cur.Text)
+	}
+
+	newText := strings.TrimSpace(in.NewText)
+	if newText == "" {
+		return Fact{}, false, fmt.Errorf("new 不能为空")
+	}
+	if newText == cur.Text {
+		return cur, false, nil
+	}
+
+	updated := cur
+	updated.Text = newText
+	if in.Tags != nil {
+		updated.Tags = in.Tags
+	}
+	if in.Confidence > 0 {
+		updated.Confidence = in.Confidence
+	}
+	// 修正是一次显式动作：来源升级为 tool，之后自动抽取不能覆盖。
+	updated.Origin = OriginTool
+	updated.UpdatedAt = time.Now()
+
+	if err := s.append(updated); err != nil {
+		return Fact{}, false, err
+	}
+	s.rebuildIndex()
+	if err := s.writeMemoryFile(); err != nil {
+		return updated, true, err
+	}
+	return updated, true, nil
+}
+
 // Forget 把事实置为 archived（不物理删除）。
 func (s *Store) Forget(id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	if s.f == nil {
+		return fmt.Errorf("记忆库为只读模式")
+	}
 	if _, ok := s.facts[id]; !ok {
 		return fmt.Errorf("找不到事实 %s", id)
 	}
@@ -580,6 +762,9 @@ func (s *Store) renderLocked() string {
 func (s *Store) Rebuild() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.f == nil {
+		return fmt.Errorf("记忆库为只读模式")
+	}
 	// 用户可能在进程外改了 MEMORY.md，重建前必须重新读一次手工区。
 	if err := s.reloadManual(); err != nil {
 		return err

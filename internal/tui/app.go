@@ -27,13 +27,16 @@ type Options struct {
 	SessionID string
 	Notices   []string
 	History   []llm.Message
+	// MemoryReadOnly 为 true 时状态栏常驻“记忆只读”标识。
+	MemoryReadOnly bool
 
 	// NewSession / ListSessions 供 /new、/sessions 命令使用，可为 nil。
 	NewSession   func() (string, error)
 	ListSessions func() ([]string, error)
-	// ListMemory / RebuildMemory 供 /memory 命令使用，可为 nil。
-	ListMemory    func() ([]string, error)
-	RebuildMemory func() (int, error)
+	// ListMemory / RebuildMemory / MemoryReconnect 供 /memory 命令使用，可为 nil。
+	ListMemory      func() ([]string, error)
+	RebuildMemory   func() (int, error)
+	MemoryReconnect func() (string, error)
 	// Compact 供 /compact 命令使用，可为 nil。传入 ctx 以便 Ctrl+C 能中断摘要请求。
 	Compact func(context.Context) (string, error)
 	// MCPStatus / MCPReconnect 供 /mcp 与 /mcp reconnect 使用，可为 nil。
@@ -107,10 +110,12 @@ type model struct {
 	overlay         bool
 
 	sessionID    string
+	memReadOnly  bool
 	newSession   func() (string, error)
 	listSessions func() ([]string, error)
 	listMemory   func() ([]string, error)
 	rebuildMem   func() (int, error)
+	memReconnect func() (string, error)
 	compact      func(context.Context) (string, error)
 	mcpStatus    func() []string
 	mcpReconnect func(context.Context, string) error
@@ -164,10 +169,12 @@ func newModel(opts Options) *model {
 		ctx:          ctx,
 		cancel:       cancel,
 		sessionID:    opts.SessionID,
+		memReadOnly:  opts.MemoryReadOnly,
 		newSession:   opts.NewSession,
 		listSessions: opts.ListSessions,
 		listMemory:   opts.ListMemory,
 		rebuildMem:   opts.RebuildMemory,
+		memReconnect: opts.MemoryReconnect,
 		compact:      opts.Compact,
 		mcpStatus:    opts.MCPStatus,
 		mcpReconnect: opts.MCPReconnect,
@@ -206,6 +213,10 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "y":
 				return m, m.resolveApproval(agent.AllowOnce)
 			case "a":
+				// 记忆修正必须逐次确认，不提供会话级免审。
+				if m.pendingApproval != nil && m.pendingApproval.Tool == "memory_update" {
+					return m, nil
+				}
 				return m, m.resolveApproval(agent.AllowSession)
 			case "n", "esc":
 				return m, m.resolveApproval(agent.Deny)
@@ -528,6 +539,20 @@ func (m *model) command(input string) tea.Cmd {
 		}
 
 	case "/memory":
+		if len(fields) > 1 && fields[1] == "reconnect" {
+			if m.memReconnect == nil {
+				m.notice("当前模式不支持恢复记忆写入")
+				return nil
+			}
+			msg, err := m.memReconnect()
+			if err != nil {
+				m.notice("恢复记忆写入失败：" + err.Error())
+				return nil
+			}
+			m.memReadOnly = false
+			m.notice(msg)
+			return nil
+		}
 		// /memory rebuild：在进程内重读 MEMORY.md 手工区并重建视图，
 		// 否则运行中的会话持有记忆库排他锁，外部 `agent memory rebuild` 会被拒。
 		if len(fields) > 1 && fields[1] == "rebuild" {
@@ -686,7 +711,7 @@ func (m *model) command(input string) tea.Cmd {
 		}
 
 	case "/help":
-		m.notice("/new 新建会话 · /sessions 会话列表 · /memory 长期记忆 · /memory rebuild 重读手工区 · /skill 技能列表 · /skill <name> 查看技能 · /skill reload 重新扫描 · /compact 压缩历史 · /mcp MCP 状态 · /mcp reconnect <server|all> 重连 · /preview 预览地址 · ctrl+o 打开预览 · /log 最近日志 · /help 帮助")
+		m.notice("/new 新建会话 · /sessions 会话列表 · /memory 长期记忆 · /memory rebuild 重读手工区 · /memory reconnect 恢复写入 · /skill 技能列表 · /skill <name> 查看技能 · /skill reload 重新扫描 · /compact 压缩历史 · /mcp MCP 状态 · /mcp reconnect <server|all> 重连 · /preview 预览地址 · ctrl+o 打开预览 · /log 最近日志 · /help 帮助")
 
 	default:
 		m.notice("未知命令：" + fields[0] + "（/help 查看）")

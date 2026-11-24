@@ -156,21 +156,26 @@ func chatCmd() *cobra.Command {
 			}
 
 			return tui.Run(tui.Options{
-				Agent:        b.agent,
-				Model:        b.model,
-				Events:       events,
-				Approver:     approver,
-				SessionID:    store.Meta().ID,
-				Notices:      notices,
-				History:      history,
-				NewSession:   newSession,
-				ListSessions: listSessions,
+				Agent:          b.agent,
+				Model:          b.model,
+				Events:         events,
+				Approver:       approver,
+				SessionID:      store.Meta().ID,
+				Notices:        notices,
+				History:        history,
+				MemoryReadOnly: b.memReadOnly,
+				NewSession:     newSession,
+				ListSessions:   listSessions,
 				ListMemory: func() ([]string, error) {
 					if b.mem == nil {
 						return []string{"长期记忆未启用"}, nil
 					}
 					facts := b.mem.Active("")
-					out := []string{fmt.Sprintf("长期记忆：%d 条活跃事实", len(facts))}
+					header := fmt.Sprintf("长期记忆：%d 条活跃事实", len(facts))
+					if b.memReadOnly {
+						header = fmt.Sprintf("长期记忆（只读，另一进程占用）：%d 条活跃事实；新记忆和修正不会保存", len(facts))
+					}
+					out := []string{header}
 					for i, f := range facts {
 						if i >= 8 {
 							out = append(out, "…（用 agent memory list 查看全部）")
@@ -188,11 +193,15 @@ func chatCmd() *cobra.Command {
 					if b.mem == nil {
 						return 0, fmt.Errorf("长期记忆未启用")
 					}
+					if b.memReadOnly {
+						return 0, fmt.Errorf("记忆库为只读模式：关闭其他 agent 窗口后执行 /memory reconnect")
+					}
 					if err := b.mem.Rebuild(); err != nil {
 						return 0, err
 					}
 					return b.mem.Count(), nil
 				},
+				MemoryReconnect: b.MemoryReconnect,
 				Compact: func(ctx context.Context) (string, error) {
 					return b.agent.Compact(ctx)
 				},

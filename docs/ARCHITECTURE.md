@@ -265,13 +265,13 @@ func (b Budget) Estimate(msgs []llm.Message) int // tiktoken-go，失败时回�
 1. 显式：模型调用 `memory_write`（key/text/scope/tags，`origin=tool`）→ 立即落盘并广播 `memory.changed`。
 2. 自动：turn 结束后的后台 goroutine 调 `extractor`，从最近若干轮抽取候选事实（`origin=auto`，JSON schema 约束输出），过 `confidence ≥ 0.6` 才入库；同一 key 冲突时新值 supersede 旧值，旧值保留可追溯。
 3. 日终：把当天 episodes 压成 10~20 条"当天值得记住的事"，并入 facts。
-4. 修正：`memory_update` 必须带 `key` 与新旧值，只允许改**已存在**的 key（新事实一律走 `memory_write`），TUI 内展示 diff 后确认；`MEMORY.md` 的"手工区"禁止模型覆写，只能由人编辑（写回时 `origin=manual`）。
+4. 修正：`memory_update`（key/old/new）只允许改**已存在且有 key** 的事实；`new` 为空、`old` 与当前值不一致、目标为 `origin=manual` 时都会被拒绝。审批弹层展示旧值/新值与行级 diff，确认后原地更新（id 不变、`origin=tool`、`updated_at` 刷新），`facts.jsonl` 追加快照留痕。`MEMORY.md` 的"手工区"禁止模型覆写，只能由人编辑（写回时 `origin=manual`）。
 
 **`MEMORY.md` 渲染规则**：文件分两段——自动区（由 facts 渲染，整体覆盖）与手工区（`<!-- manual:begin -->` / `<!-- manual:end -->`，原样保留）。重渲染只替换自动区；手工区在启动与保存时解析为 `origin=manual` 的事实（按行内容生成稳定 key），与自动事实冲突时 manual 优先。
 
-**覆盖优先级**：自动抽取只能 supersede `origin=auto` 的事实；碰到 `origin=manual` 或 `origin=tool` 的事实，一律降级为"建议修改"事件推给 TUI，由人确认后才由 `memory_update` 改写。
+**覆盖优先级**：自动抽取只能 supersede `origin=auto` 的事实；`origin=tool` 可以覆盖 auto 与 tool，但不能覆盖 manual；`origin=manual` 只能由人编辑 `MEMORY.md`。自动抽取的“建议修改”事件尚未接入，当前修正由模型显式调用 `memory_update` 完成。
 
-**工具与排期**：M3 交付 `memory_write` / `memory_search` / `memory_forget(id)`（按 id 置 `archived`，不物理删除）与 `agent memory rebuild`（从 `facts.jsonl` 重渲染 `MEMORY.md`，是"手改事实文件"的保底通道；否则抽取出错时事实既改不了也删不掉）。`memory_update` 推迟到 M3.5，diff 确认复用 M1 的审批 overlay（同一个组件只换渲染内容），不新增一套界面。
+**工具与排期**：M3 交付 `memory_write` / `memory_search` / `memory_forget(id)`（按 id 置 `archived`，不物理删除）与 `agent memory rebuild`（从 `facts.jsonl` 重渲染 `MEMORY.md`，是"手改事实文件"的保底通道；否则抽取出错时事实既改不了也删不掉）。M3.5 已交付 `memory_update`：同 id 快照更新，diff 确认复用 M1 的审批 overlay（同一个组件只换渲染内容），不新增一套界面。
 
 **读取路径（每 turn 开始）**
 
@@ -289,7 +289,7 @@ query = 最近 2 轮用户消息 + 当前输入
 
 - 追加写：`os.OpenFile(O_APPEND)` + 单条 `Write`（<4KB 时近似原子），每 N 条或每 turn 结束 `Sync()`。
 - 重写（压缩/去重）：写 `facts.jsonl.tmp` → `Sync` → `os.Rename` 覆盖（Windows 上先 `os.Remove` 再 rename，失败重试 3 次）。
-- 单写者：所有写操作进 `memory.Store` 的串行队列（`chan func()` 单 worker），避免后台 goroutine 与 turn loop 并发写坏文件。
+- 单写者：进程内用 `sync.Mutex` 串行化，进程间用 `data/memory/lock` 的排他 flock 保证只有一个写者。写锁被占用时，新进程降级为只读视图：不加锁、只注册 `memory_search`、保留召回，TUI 状态栏显示“记忆只读”；占用进程释放锁后执行 `/memory reconnect` 重新获取写锁并重载最新事实，无需重启。
 - 启动校验：逐行 `json.Unmarshal`，坏行搬到 `facts.corrupt.jsonl` 并告警，不阻塞启动。
 
 **遗忘与衰减**：90 天未被检索且 `confidence<0.7` 且 `origin=auto` → `archived`；`origin=manual` 的事实永不自动衰减。
@@ -641,7 +641,7 @@ sequenceDiagram
 | M0 骨架 | go.mod、config、provider、TUI 空壳、`run` 子命令 | `agent run "hi"` 能流式打印回答 |
 | M1 工具循环 | registry、shell、fs、审批、TUI 工具卡片 | 多步调用可跑，危险命令必弹审批 |
 | M2 会话 | 事件溯源、回放、`--resume`、崩溃恢复 | 强杀进程后重启不丢已提交消息 |
-| M3 记忆 | facts、BM25、`memory_write`/`memory_search`/`memory_forget`、`agent memory rebuild`、`/memory` 面板（自动抽取随 M3.5） | 跨会话记住并正确引用；手改 facts 后 `rebuild` 能恢复视图 |
+| M3 记忆 | facts、BM25、`memory_write`/`memory_search`/`memory_forget`、`agent memory rebuild`、`/memory` 面板（自动抽取未接入） | 跨会话记住并正确引用；手改 facts 后 `rebuild` 能恢复视图 |
 | M3.5 记忆修正 | `memory_update` + diff 确认（复用 M1 审批 overlay，不新增界面） | 可信事实可改且留痕，不再有"只能手改 JSONL"的真空期 |
 | M4 摘要 | L1 预算与压缩、摘要持久化/恢复、`/compact`（L2 日摘要暂缓） | 100 轮不超窗，摘要保真校验通过 |
 | M5 MCP | manager、stdio/http、状态栏与 `/mcp` | 接入 filesystem server 并调用成功 |
@@ -649,7 +649,7 @@ sequenceDiagram
 | M7 页面 | artifact 工具、预览服务、设计系统、`web-report` 技能 | 一句话产出 375px 可读、无外链的成品页 |
 | M8 打磨 | doctor、成本、日志、golden 测试、README | 单二进制可在干净 Windows 跑通全流程 |
 
-> **当前进度（2026-11-20）**：M0 ~ M8 已完成（M3.5 与 M4 的 L2 日摘要未做）。
+> **当前进度（2026-11-24）**：M0 ~ M8 已完成（M4 的 L2 日摘要未做）。
 >
 > - M0：`go.mod`、配置加载/校验、OpenAI 兼容流式 Provider + mock、`run`、TUI 骨架。
 > - M1：`tools` 注册表与 Schema 反射、`shell`/`fs_read`/`fs_list`、路径 jail、bash 探测（含能力探测与 WSL 排除）、Windows Job Object 超时杀树、turn loop（工具结果回灌、审批拒绝降级）、TUI 工具卡片与审批弹层。

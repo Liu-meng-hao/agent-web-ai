@@ -103,7 +103,7 @@ docs/               架构文档
 | M1.1 修补（Schema 描述、错误渲染、env 白名单、敏感文件、untrusted 标记） | ✅ 已完成 |
 | M2 会话（事件溯源 / 崩溃恢复 / resume / replay） | ✅ 已完成 |
 | M3 长记忆（facts / BM25 / write·search·forget / rebuild / 召回注入） | ✅ 已完成 |
-| M3.5 记忆修正（memory_update + diff 确认） | 未做 |
+| M3.5 记忆修正（memory_update + diff 确认） | ✅ 已完成 |
 | M4 摘要（L1 预算与压缩 / 持久化 / 恢复 / `/compact`） | ✅ 已完成 |
 | M5 MCP（stdio / streamable HTTP / 状态栏 / `/mcp`） | ✅ 已完成 |
 | M6 Skill（loader / catalog / `skill_load` / `skill_read_file`） | ✅ 已完成 |
@@ -129,9 +129,11 @@ agent replay 01M7VJ28 --from 10 --to 20
 ## 长期记忆
 
 - **写入**：模型调用 `memory_write`（text/key/scope/confidence），同 key 覆盖旧值，无 key 按文本相似度去重。
+- **修正**：模型调用 `memory_update`（key/old/new），只改已存在且有 key 的事实；审批弹层展示 diff，确认后原地更新并保留历史快照。
 - **召回**：每轮按用户输入做 BM25 + 时间衰减检索，合并进 system prompt；`session` 作用域只在本会话可见。
-- **手工修正**：直接编辑 `data/memory/MEMORY.md` 的 manual 区，然后 `agent memory rebuild`；运行中的 TUI 里用 `/memory rebuild`。
+- **手工修正**：直接编辑 `data/memory/MEMORY.md` 的 manual 区，然后 `agent memory rebuild`；运行中的 TUI 里用 `/memory rebuild`。手工区事实不能被 `memory_update` 覆盖。
 - **删除**：`memory_forget(id)` 只置 `archived`，不物理删除。
+- **并发**：记忆库单写者。写锁被另一个 agent 进程占用时，新窗口自动降级为只读：保留 `memory_search` 与召回，不注册写入/修正工具，状态栏显示“记忆只读”，`/memory rebuild` 会被拒绝；关闭其他窗口后执行 `/memory reconnect` 即可恢复写入。
 
 ## MCP 与浏览器
 

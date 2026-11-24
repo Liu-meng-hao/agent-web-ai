@@ -239,13 +239,49 @@ func (m *model) renderApproval(width int) string {
 			riskStyle.Render("["+req.Risk.String()+"]"),
 	}
 	if req.Preview != "" {
-		for _, l := range wrapText("$ "+req.Preview, inner) {
-			lines = append(lines, dimStyle.Render(l))
+		if strings.Contains(req.Preview, "\n") {
+			lines = append(lines, renderDiffPreview(req.Preview, inner)...)
+		} else {
+			for _, l := range wrapText("$ "+req.Preview, inner) {
+				lines = append(lines, dimStyle.Render(l))
+			}
 		}
 	}
 	lines = append(lines, "")
-	lines = append(lines, hintStyle.Render("[y] 允许一次   [a] 本会话允许   [n] 拒绝"))
+	hint := "[y] 允许一次   [a] 本会话允许   [n] 拒绝"
+	if req.Tool == "memory_update" {
+		// 记忆修正不做会话级免审，否则后续修正会跳过 diff 确认。
+		hint = "[y] 允许修正   [n] 拒绝"
+	}
+	lines = append(lines, hintStyle.Render(hint))
 	return approvalStyle.Width(maxInt(20, width-4)).Render(strings.Join(lines, "\n"))
+}
+
+// renderDiffPreview 渲染多行审批预览，+/- 行分别着色，并限制总行数。
+func renderDiffPreview(preview string, width int) []string {
+	raw := strings.Split(preview, "\n")
+	const maxLines = 16
+	truncated := len(raw) > maxLines
+	if truncated {
+		raw = raw[:maxLines]
+	}
+	out := make([]string, 0, len(raw)+1)
+	for _, line := range raw {
+		style := dimStyle
+		switch {
+		case strings.HasPrefix(line, "+"):
+			style = okStyle
+		case strings.HasPrefix(line, "-"):
+			style = errStyle
+		}
+		for _, l := range wrapText(line, width) {
+			out = append(out, style.Render(l))
+		}
+	}
+	if truncated {
+		out = append(out, dimStyle.Render("…（差异已截断）"))
+	}
+	return out
 }
 
 func (m *model) statusLine(width int) string {
@@ -260,6 +296,9 @@ func (m *model) statusLine(width int) string {
 	}
 
 	parts := []string{state}
+	if m.memReadOnly {
+		parts = append(parts, "记忆只读")
+	}
 	if m.tokensIn+m.tokensOut > 0 {
 		parts = append(parts, fmt.Sprintf("%s in / %s out",
 			humanTokens(m.tokensIn), humanTokens(m.tokensOut)))

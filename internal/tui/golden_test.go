@@ -20,6 +20,14 @@ var ansiRE = regexp.MustCompile("\x1b\\[[0-9;]*m")
 // plain 去掉 ANSI 颜色，保证 golden 与终端能力无关。
 func plain(s string) string { return ansiRE.ReplaceAllString(s, "") }
 
+func TestStatusShowsMemoryReadOnly(t *testing.T) {
+	m := newModel(Options{MemoryReadOnly: true})
+	line := plain(m.statusLine(80))
+	if !strings.Contains(line, "记忆只读") {
+		t.Fatalf("只读状态栏缺少标识: %q", line)
+	}
+}
+
 func newTestModel() *model {
 	ag := agent.New(agent.Options{
 		Provider: llm.Mock{},

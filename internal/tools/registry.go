@@ -57,6 +57,12 @@ type AutoApprover interface {
 	AutoApprove() bool
 }
 
+// Previewer 是工具的可选能力：为审批弹层生成比原始参数更可读的预览。
+// 实现必须是只读的，不能产生副作用。
+type Previewer interface {
+	Preview(args json.RawMessage, tc *CallContext) string
+}
+
 // Registry 是工具注册表。
 type Registry struct {
 	mu    sync.RWMutex

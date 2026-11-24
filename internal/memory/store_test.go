@@ -3,6 +3,7 @@ package memory
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -371,5 +372,241 @@ func TestMissingMarkersDoNotArchiveManual(t *testing.T) {
 	defer s2.Close()
 	if len(s2.Active(ScopeProject)) != 1 {
 		t.Fatalf("标记缺失时手工事实被归档: %+v", s2.Active(""))
+	}
+}
+
+// TestUpdateKeepsIDAndHistory 守住修正语义：同 id、来源升级、追加历史快照。
+func TestUpdateKeepsIDAndHistory(t *testing.T) {
+	s, root := newStore(t)
+	f := NewFact("本机使用 npm，Node 18")
+	f.Key = "tooling.pkg"
+	saved, _, err := s.Write(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := countFacts(t, root)
+
+	updated, changed, err := s.Update(UpdateInput{
+		Key:     "tooling.pkg",
+		OldText: "本机使用 npm，Node 18",
+		NewText: "本机使用 pnpm，Node 20.19.5",
+	})
+	if err != nil || !changed {
+		t.Fatalf("修正失败: err=%v changed=%v", err, changed)
+	}
+	if updated.ID != saved.ID {
+		t.Fatalf("修正不应改变 id: %s -> %s", saved.ID, updated.ID)
+	}
+	if updated.Text != "本机使用 pnpm，Node 20.19.5" || updated.Origin != OriginTool {
+		t.Fatalf("修正结果不对: %+v", updated)
+	}
+	if !updated.TS.Equal(saved.TS) {
+		t.Fatal("修正不应改变首次写入时间")
+	}
+	if got := countFacts(t, root); got != before+1 {
+		t.Fatalf("facts.jsonl 应追加一条快照，当前 %d, want %d", got, before+1)
+	}
+	cur, err := s.Lookup("tooling.pkg", ScopeProject, "")
+	if err != nil || cur.Text != updated.Text {
+		t.Fatalf("Lookup 未返回修正后的值: %+v err=%v", cur, err)
+	}
+	md, err := os.ReadFile(filepath.Join(root, memoryFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(md), "本机使用 pnpm") {
+		t.Fatalf("MEMORY.md 未重渲染:\n%s", md)
+	}
+}
+
+func TestUpdateRejectsInvalidInput(t *testing.T) {
+	s, _ := newStore(t)
+	f := NewFact("旧值")
+	f.Key = "k"
+	if _, _, err := s.Write(f); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, _, err := s.Update(UpdateInput{Key: "k", OldText: "不匹配", NewText: "新值"}); err == nil || !strings.Contains(err.Error(), "旧值不匹配") {
+		t.Fatalf("旧值不一致应被拒绝: %v", err)
+	}
+	if cur, _ := s.Lookup("k", ScopeProject, ""); cur.Text != "旧值" {
+		t.Fatalf("拒绝后不应改库: %+v", cur)
+	}
+	if _, _, err := s.Update(UpdateInput{Key: "missing", OldText: "x", NewText: "y"}); err == nil || !strings.Contains(err.Error(), "没有找到") {
+		t.Fatalf("不存在的 key 应被拒绝: %v", err)
+	}
+	if _, _, err := s.Update(UpdateInput{Key: "k", OldText: "旧值", NewText: "  "}); err == nil {
+		t.Fatalf("空新值应被拒绝")
+	}
+
+	changed, changedFlag, err := s.Update(UpdateInput{Key: "k", OldText: "旧值", NewText: "旧值"})
+	if err != nil || changedFlag {
+		t.Fatalf("相同内容不应写盘: %+v changed=%v err=%v", changed, changedFlag, err)
+	}
+}
+
+func TestUpdateRejectsManualFact(t *testing.T) {
+	s, _ := newStore(t)
+	f := NewFact("手工维护的偏好")
+	f.Key = "manual.abc"
+	f.Origin = OriginManual
+	if _, _, err := s.Write(f); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := s.Update(UpdateInput{Key: "manual.abc", OldText: "手工维护的偏好", NewText: "新偏好"}); err == nil || !strings.Contains(err.Error(), "手工区") {
+		t.Fatalf("手工事实不应被工具修正: %v", err)
+	}
+}
+
+func TestUpdateSessionScopeIsolated(t *testing.T) {
+	s, _ := newStore(t)
+	f := NewFact("本会话偏好")
+	f.Key = "session.pref"
+	f.Scope = ScopeSession
+	f.Source.Session = "s1"
+	if _, _, err := s.Write(f); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, _, err := s.Update(UpdateInput{
+		Key: "session.pref", Scope: ScopeSession, OldText: "本会话偏好", NewText: "新偏好", SessionID: "s2",
+	}); err == nil {
+		t.Fatal("不应跨会话修正")
+	}
+	if _, _, err := s.Update(UpdateInput{
+		Key: "session.pref", Scope: ScopeSession, OldText: "本会话偏好", NewText: "新偏好",
+	}); err == nil {
+		t.Fatal("session 作用域缺少会话上下文应被拒绝")
+	}
+	if _, changed, err := s.Update(UpdateInput{
+		Key: "session.pref", Scope: ScopeSession, OldText: "本会话偏好", NewText: "新偏好", SessionID: "s1",
+	}); err != nil || !changed {
+		t.Fatalf("本会话应能修正: err=%v changed=%v", err, changed)
+	}
+}
+
+func TestUpdateToolPreviewAndExecute(t *testing.T) {
+	s, _ := newStore(t)
+	f := NewFact("本仓库使用 npm")
+	f.Key = "tooling.pm"
+	if _, _, err := s.Write(f); err != nil {
+		t.Fatal(err)
+	}
+
+	tool := Tools(s)[2] // memory_write / memory_search / memory_update / memory_forget
+	previewer, ok := tool.(tools.Previewer)
+	if !ok {
+		t.Fatal("memory_update 应实现 Previewer")
+	}
+	args, _ := json.Marshal(map[string]any{
+		"key": "tooling.pm",
+		"old": "本仓库使用 npm",
+		"new": "本仓库使用 pnpm",
+	})
+	preview := previewer.Preview(args, nil)
+	if !strings.Contains(preview, "- 本仓库使用 npm") || !strings.Contains(preview, "+ 本仓库使用 pnpm") {
+		t.Fatalf("预览缺少 diff:\n%s", preview)
+	}
+
+	res, err := tool.Execute(context.Background(), args, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(res.Content, "已修正") {
+		t.Fatalf("执行结果不对: %s", res.Content)
+	}
+	if cur, _ := s.Lookup("tooling.pm", ScopeProject, ""); cur.Text != "本仓库使用 pnpm" {
+		t.Fatalf("工具未完成修正: %+v", cur)
+	}
+}
+
+func TestOpenReturnsErrLocked(t *testing.T) {
+	s, root := newStore(t)
+	defer s.Close()
+
+	if _, err := Open(root); !errors.Is(err, ErrLocked) {
+		t.Fatalf("第二个写实例应返回 ErrLocked, got %v", err)
+	}
+}
+
+func TestUpgradeFromReadOnly(t *testing.T) {
+	s, root := newStore(t)
+	if _, _, err := s.Write(NewFact("恢复写入后仍能看到")); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	ro, err := OpenReadOnly(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ro.Close()
+	if err := ro.Upgrade(); err != nil {
+		t.Fatal(err)
+	}
+	if ro.ReadOnly() {
+		t.Fatal("Upgrade 后应为可写")
+	}
+	if _, _, err := ro.Write(NewFact("恢复后的新事实")); err != nil {
+		t.Fatalf("恢复写入失败: %v", err)
+	}
+	if facts := ro.Active(""); len(facts) != 2 {
+		t.Fatalf("恢复后应同时保留新旧事实: %+v", facts)
+	}
+}
+
+func TestUpgradeFailsWhileWriterHoldsLock(t *testing.T) {
+	s, root := newStore(t)
+	defer s.Close()
+
+	ro, err := OpenReadOnly(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ro.Close()
+	if err := ro.Upgrade(); !errors.Is(err, ErrLocked) {
+		t.Fatalf("写锁未释放时应返回 ErrLocked, got %v", err)
+	}
+	if !ro.ReadOnly() {
+		t.Fatal("升级失败后仍应为只读")
+	}
+}
+
+func TestReadOnlyStore(t *testing.T) {
+	s, root := newStore(t)
+	f := NewFact("只读可检索的事实")
+	f.Key = "readonly.fact"
+	if _, _, err := s.Write(f); err != nil {
+		t.Fatal(err)
+	}
+
+	ro, err := OpenReadOnly(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ro.Close()
+	if !ro.ReadOnly() {
+		t.Fatal("ReadOnly 应为 true")
+	}
+	if got := ro.Search("检索", 5, ""); len(got) != 1 {
+		t.Fatalf("只读视图应能检索: %+v", got)
+	}
+	if _, _, err := ro.Write(NewFact("新事实")); err == nil || !strings.Contains(err.Error(), "只读") {
+		t.Fatalf("只读 Write 应被拒绝: %v", err)
+	}
+	if _, _, err := ro.Update(UpdateInput{Key: "readonly.fact", OldText: "只读可检索的事实", NewText: "新值"}); err == nil || !strings.Contains(err.Error(), "只读") {
+		t.Fatalf("只读 Update 应被拒绝: %v", err)
+	}
+	if err := ro.Forget("x"); err == nil || !strings.Contains(err.Error(), "只读") {
+		t.Fatalf("只读 Forget 应被拒绝: %v", err)
+	}
+	if err := ro.Rebuild(); err == nil || !strings.Contains(err.Error(), "只读") {
+		t.Fatalf("只读 Rebuild 应被拒绝: %v", err)
+	}
+	if tools := ReadOnlyTools(ro); len(tools) != 1 || tools[0].Name() != "memory_search" {
+		t.Fatalf("只读工具集应只含 memory_search: %+v", tools)
 	}
 }

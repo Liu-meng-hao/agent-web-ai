@@ -255,3 +255,102 @@ func TestLoopMaxStepsKeepsGeneratedPage(t *testing.T) {
 		t.Fatalf("缺少保留页面的提示: %q", notice)
 	}
 }
+
+func TestLoopSkipsDuplicateBrowserVerification(t *testing.T) {
+	const toolName = "mcp__playwright__browser_evaluate"
+	args := json.RawMessage(`{"function":"() => 1"}`)
+
+	executed := 0
+	reg := tools.NewRegistry()
+	if err := reg.Register(tools.Define(toolName, "test", tools.RiskRead,
+		func(ctx context.Context, in struct{}, tc *tools.CallContext) (tools.Result, error) {
+			executed++
+			return tools.Result{Content: "ok"}, nil
+		})); err != nil {
+		t.Fatal(err)
+	}
+
+	first := llm.ToolCall{ID: "e1", Name: toolName, Args: args}
+	second := llm.ToolCall{ID: "e2", Name: toolName, Args: args}
+	prov := &scriptedProvider{steps: [][]llm.Event{
+		{
+			{Type: llm.EventTool, ToolCall: &first},
+			{Type: llm.EventTool, ToolCall: &second},
+			{Type: llm.EventDone, FinishReason: "tool_calls"},
+		},
+		{{Type: llm.EventText, Text: "done"}, {Type: llm.EventDone, FinishReason: "stop"}},
+	}}
+
+	a := New(Options{
+		Provider: prov,
+		Model:    "scripted",
+		Registry: reg,
+		Policy:   security.NewPolicy("standard"),
+		Approver: AllowAll{},
+		MaxSteps: 6,
+	})
+
+	skipped := 0
+	a.opts.Emit = func(ev Event) {
+		if ev.Type == EventToolResult && ev.Result != nil && strings.Contains(ev.Result.Content, "已跳过重复验证") {
+			skipped++
+		}
+	}
+	if err := a.RunTurn(context.Background(), "go"); err != nil {
+		t.Fatal(err)
+	}
+	if executed != 1 {
+		t.Fatalf("执行次数 = %d, want 1", executed)
+	}
+	if skipped != 1 {
+		t.Fatalf("跳过次数 = %d, want 1", skipped)
+	}
+}
+
+func TestLoopAllowsBrowserVerificationAfterWrite(t *testing.T) {
+	const evaluateName = "mcp__playwright__browser_evaluate"
+	args := json.RawMessage(`{"function":"() => 1"}`)
+
+	evaluateCalls := 0
+	reg := tools.NewRegistry()
+	if err := reg.Register(tools.Define(evaluateName, "test", tools.RiskRead,
+		func(ctx context.Context, in struct{}, tc *tools.CallContext) (tools.Result, error) {
+			evaluateCalls++
+			return tools.Result{Content: "ok"}, nil
+		})); err != nil {
+		t.Fatal(err)
+	}
+	if err := reg.Register(tools.Define("artifact_write", "test", tools.RiskWrite,
+		func(ctx context.Context, in struct{}, tc *tools.CallContext) (tools.Result, error) {
+			return tools.Result{Content: "saved"}, nil
+		})); err != nil {
+		t.Fatal(err)
+	}
+
+	steps := []llm.ToolCall{
+		{ID: "e1", Name: evaluateName, Args: args},
+		{ID: "w1", Name: "artifact_write", Args: json.RawMessage(`{"slug":"x"}`)},
+		{ID: "e2", Name: evaluateName, Args: args},
+	}
+	prov := &scriptedProvider{steps: [][]llm.Event{
+		{{Type: llm.EventTool, ToolCall: &steps[0]}, {Type: llm.EventDone, FinishReason: "tool_calls"}},
+		{{Type: llm.EventTool, ToolCall: &steps[1]}, {Type: llm.EventDone, FinishReason: "tool_calls"}},
+		{{Type: llm.EventTool, ToolCall: &steps[2]}, {Type: llm.EventDone, FinishReason: "tool_calls"}},
+		{{Type: llm.EventText, Text: "done"}, {Type: llm.EventDone, FinishReason: "stop"}},
+	}}
+
+	a := New(Options{
+		Provider: prov,
+		Model:    "scripted",
+		Registry: reg,
+		Policy:   security.NewPolicy("standard"),
+		Approver: AllowAll{},
+		MaxSteps: 6,
+	})
+	if err := a.RunTurn(context.Background(), "go"); err != nil {
+		t.Fatal(err)
+	}
+	if evaluateCalls != 2 {
+		t.Fatalf("页面更新后应允许复查，执行次数 = %d, want 2", evaluateCalls)
+	}
+}

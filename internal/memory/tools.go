@@ -2,6 +2,7 @@ package memory
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -10,7 +11,12 @@ import (
 
 // Tools 返回记忆相关工具，由装配层注册进注册表。
 func Tools(s *Store) []tools.Tool {
-	return []tools.Tool{newWriteTool(s), newSearchTool(s), newForgetTool(s)}
+	return []tools.Tool{newWriteTool(s), newSearchTool(s), newUpdateTool(s), newForgetTool(s)}
+}
+
+// ReadOnlyTools 返回只读视图下可用的记忆工具。
+func ReadOnlyTools(s *Store) []tools.Tool {
+	return []tools.Tool{newSearchTool(s)}
 }
 
 type writeInput struct {
@@ -95,6 +101,83 @@ func newSearchTool(s *Store) tools.Tool {
 			}
 			return tools.Result{Content: strings.TrimRight(b.String(), "\n")}, nil
 		})
+}
+
+type updateInput struct {
+	Key        string   `json:"key" jsonschema:"description=要修正的事实的稳定键，必须已经存在"`
+	Scope      string   `json:"scope,omitempty" jsonschema:"description=作用域：user 跨会话偏好，project 本仓库事实，session 仅本会话；默认 project"`
+	Old        string   `json:"old" jsonschema:"description=修正前的当前值，必须与记忆中的内容完全一致"`
+	New        string   `json:"new" jsonschema:"description=修正后的新值"`
+	Tags       []string `json:"tags,omitempty" jsonschema:"description=可选：替换标签；省略则保留原标签"`
+	Confidence float64  `json:"confidence,omitempty" jsonschema:"description=可选：新的置信度 0 到 1；省略则保留原值"`
+}
+
+// updateTool 在通用工具之上附带审批预览（diff）能力。
+type updateTool struct {
+	tools.Tool
+	s *Store
+}
+
+func newUpdateTool(s *Store) tools.Tool {
+	base := tools.Define("memory_update", "修正一条已有 key 的长期记忆：必须提供旧值 old 与新值 new。只改已存在的 key，新事实请用 memory_write。MEMORY.md 手工区的事实只能由用户编辑。修正会保留历史快照。", tools.RiskWrite,
+		func(ctx context.Context, in updateInput, tc *tools.CallContext) (tools.Result, error) {
+			sid := ""
+			if tc != nil && tc.SessionID != nil {
+				sid = tc.SessionID()
+			}
+			updated, changed, err := s.Update(UpdateInput{
+				Key:        in.Key,
+				Scope:      in.Scope,
+				OldText:    in.Old,
+				NewText:    in.New,
+				Tags:       in.Tags,
+				Confidence: in.Confidence,
+				SessionID:  sid,
+			})
+			if err != nil {
+				return tools.Result{Content: "修正记忆被拒绝：" + err.Error()}, nil
+			}
+			if !changed {
+				return tools.Result{Content: fmt.Sprintf("记忆 [%s] 未变化，无需修正", updated.ID)}, nil
+			}
+			return tools.Result{Content: fmt.Sprintf("已修正 [%s]（key=%s）：%s → %s；历史快照已保留。",
+				updated.ID, updated.Key, strings.TrimSpace(in.Old), updated.Text)}, nil
+		})
+	return &updateTool{Tool: base, s: s}
+}
+
+// Preview 在审批前展示旧值、新值与行级差异。
+func (t *updateTool) Preview(args json.RawMessage, tc *tools.CallContext) string {
+	var in updateInput
+	if err := json.Unmarshal(args, &in); err != nil {
+		return ""
+	}
+	key := strings.TrimSpace(in.Key)
+	if key == "" {
+		return "memory_update：缺少 key"
+	}
+	sid := ""
+	if tc != nil && tc.SessionID != nil {
+		sid = tc.SessionID()
+	}
+	cur, err := t.s.Lookup(key, in.Scope, sid)
+	if err != nil {
+		return "memory_update：" + err.Error()
+	}
+	newText := strings.TrimSpace(in.New)
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "key: %s   scope: %s   id: %s\n", cur.Key, cur.Scope, cur.ID)
+	fmt.Fprintf(&b, "旧值：%s\n", cur.Text)
+	fmt.Fprintf(&b, "新值：%s\n", newText)
+	if strings.TrimSpace(in.Old) != strings.TrimSpace(cur.Text) {
+		b.WriteString("⚠ old 与当前值不一致，确认后执行仍会被拒绝\n")
+	}
+	for _, line := range diffLines(cur.Text, newText, 20) {
+		b.WriteString(line)
+		b.WriteString("\n")
+	}
+	return strings.TrimRight(b.String(), "\n")
 }
 
 type forgetInput struct {

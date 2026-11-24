@@ -84,6 +84,11 @@ type Agent struct {
 	// 本轮摘要开销；每轮开始时清零，写进 trace 的 summary_* 字段。
 	sumIn, sumOut int
 	sumCost       float64
+
+	// browserSeen 记录本轮已执行过的浏览器验证（工具名 + 参数）。
+	// 页面没有变化时，重复同一验证没有收益，直接跳过；artifact_write
+	// 成功后清空，允许对新版本重新验证。
+	browserSeen map[string]bool
 }
 
 // New 构造 Agent，并补齐默认值。
@@ -211,6 +216,9 @@ func (a *Agent) RunTurn(ctx context.Context, input string) (err error) {
 		}
 		emit(Event{Type: EventTurnFinished, Stop: stop})
 	}()
+
+	// 重复验证检测只在本轮内有效，新的一轮重新开始。
+	a.browserSeen = make(map[string]bool)
 
 	a.conv.Append(llm.Message{Role: llm.RoleUser, Content: input})
 
@@ -367,6 +375,18 @@ func (a *Agent) RunTurn(ctx context.Context, input string) (err error) {
 	return ErrMaxSteps
 }
 
+// isBrowserVerification 判断是否为 MCP 浏览器验证类工具。
+// 只对浏览器调用去重：fs/shell 等重复调用可能有正当理由。
+func isBrowserVerification(name string) bool {
+	return strings.HasPrefix(name, "mcp__") && strings.Contains(name, "browser_")
+}
+
+// browserCallKey 用工具名和参数区分一次验证。模型重复调用时参数通常完全一致，
+// 直接按原文比较即可，不做 JSON 归一化。
+func browserCallKey(name string, args json.RawMessage) string {
+	return name + "\x00" + string(args)
+}
+
 func (a *Agent) execTool(ctx context.Context, turnID string, step int, call *llm.ToolCall, trace *telemetry.TurnTrace) error {
 	emit := a.opts.Emit
 	name := call.Name
@@ -394,6 +414,20 @@ func (a *Agent) execTool(ctx context.Context, turnID string, step int, call *llm
 		}
 	}
 
+	// 浏览器验证类工具：同一轮里页面没有变化时，重复同参数调用没有收益。
+	// 只拦截完全相同的调用，首次调用和页面更新后的复查都放行。
+	if isBrowserVerification(name) && a.browserSeen[browserCallKey(name, args)] {
+		const skipped = "已跳过重复验证：本轮已用相同参数调用过该工具，且页面自那之后没有变化。请直接使用上一条结果；确需重新检查，先修改页面再调用。"
+		a.conv.Append(llm.Message{Role: llm.RoleTool, ToolCallID: callID, Content: skipped})
+		a.record(session.TypeToolResult, session.ToolResult{CallID: callID, Name: name, Status: "skipped", Content: skipped})
+		trace.Tools = append(trace.Tools, telemetry.ToolTrace{CallID: callID, Name: name, Status: "skipped"})
+		a.logEvent("tool.skipped", map[string]any{
+			"turn_id": turnID, "tool": name, "call_id": callID, "step": step,
+		})
+		emit(Event{Type: EventToolResult, Step: step, Call: call, Result: &tools.Result{Content: skipped, Display: "已跳过重复验证"}})
+		return nil
+	}
+
 	emit(Event{Type: EventToolRequested, Step: step, Call: call, Risk: tool.Risk()})
 
 	decision := AllowOnce
@@ -407,11 +441,17 @@ func (a *Agent) execTool(ctx context.Context, turnID string, step int, call *llm
 	}
 	if action != security.Allow {
 		if ctx.Err() == nil {
+			preview := previewOf(call)
+			if p, ok := tool.(tools.Previewer); ok {
+				if s := p.Preview(args, a.opts.Call); s != "" {
+					preview = s
+				}
+			}
 			d, err := a.opts.Approver.Approve(ctx, ApprovalRequest{
 				Tool:    name,
 				Args:    args,
 				Risk:    tool.Risk(),
-				Preview: previewOf(call),
+				Preview: preview,
 			})
 			if err != nil {
 				d = Deny
@@ -474,6 +514,17 @@ func (a *Agent) execTool(ctx context.Context, turnID string, step int, call *llm
 			"turn_id": turnID, "tool": name, "call_id": callID,
 			"step": step, "duration_ms": dur.Milliseconds(), "error": err.Error(),
 		})
+	}
+	if err == nil {
+		// 页面变了，之前的浏览器验证结果全部失效，允许重新检查。
+		if name == "artifact_write" {
+			a.browserSeen = make(map[string]bool)
+		} else if isBrowserVerification(name) {
+			if a.browserSeen == nil {
+				a.browserSeen = make(map[string]bool)
+			}
+			a.browserSeen[browserCallKey(name, args)] = true
+		}
 	}
 
 	// 工具输出是外部内容：包一层标记，配合 system prompt 防止提示注入。
