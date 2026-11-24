@@ -1,7 +1,7 @@
 ---
 name: web-report
 description: 把数据或调研结果做成一页可在浏览器打开的精美 HTML 报告
-when_to_use: 用户要求生成数据报告、周报、数据看板、单页分析或可视化页面时
+when_to_use: 用户要求生成数据报告、周报、数据看板、单页分析或数据可视化页面时；不以数据为核心的落地页、作品集、品牌页不要用本技能
 version: 0.1.0
 allowed-tools: [fs_read, fs_list, shell, artifact_write, skill_read_file]
 ---
@@ -9,6 +9,12 @@ allowed-tools: [fs_read, fs_list, shell, artifact_write, skill_read_file]
 # Web Report
 
 把用户给的数据变成**一页自包含的 HTML 报告**：能直接在浏览器打开、手机可读、可打印，不依赖任何外网资源。
+
+## 何时不用本技能
+
+- 落地页、产品页、作品集、活动页等**不以数据为核心**的页面 → 用 `frontend-design`。
+- 只调整现有页面的视觉风格、不动报告结构 → 用 `frontend-design`。
+- 没有数据也不打算要指标、图表、明细表 → 不要套下面的报告结构。
 
 ## 流程
 
@@ -27,7 +33,7 @@ allowed-tools: [fs_read, fs_list, shell, artifact_write, skill_read_file]
    - `path`：`index.html`
    - `mode`：`create`
    - `content`：完整 HTML，样式与脚本**全部内联**
-   - 超过约 300 行或 12KB 时先 `create` 完整可打开的骨架，再用 `mode=patch` 分块补全；每块尽量大，最多 3 次 patch，避免输出截断和步数耗尽。
+   - 单次 `content` 必须 ≤ 8KB（约 100 行）：更大的页面先 `create` 一个可打开的骨架，再用 `mode=patch` 分 2–3 次补齐。一次输出整页会超过模型输出上限，工具参数 JSON 被截断后直接失败。
 5. **修自检问题**：工具返回的问题清单要逐条修，用 `mode=patch` + `old` 唯一片段修改，不要整页重写。
 6. **收尾**：把预览地址给用户，说明数据口径与图表含义；不要贴整页 HTML。
 
@@ -59,4 +65,10 @@ Charts.donut(el, { labels: [...], values: [...] })
 - 预览地址可打开，桌面与 375px 宽度都不溢出。
 - 用户能从页面第一屏读到结论，而不是一堆无解释的图。
 
-更细的排版与验收清单见 `references/page-quality.md`。
+## 参考文件（命中即必读）
+
+交付前必须读取 `references/page-quality.md`，按其中的排版与验收清单逐条自查；不要凭记忆推断检查项。
+
+| 场景 | 必读文件 |
+|---|---|
+| 任何页面交付前 | `references/page-quality.md` |

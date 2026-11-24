@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -345,4 +346,66 @@ func findTool(t *testing.T, list []tools.Tool, name string) tools.Tool {
 func strconvJSON(s string) string {
 	raw, _ := json.Marshal(s)
 	return string(raw)
+}
+
+// 技能必须把 references/ 暴露给模型，否则模型不知道有哪些按需参考文件。
+func TestSkillLoadListsReferences(t *testing.T) {
+	root := t.TempDir()
+	dir := writeSkill(t, root, "demo", demoSkill)
+	if err := os.MkdirAll(filepath.Join(dir, "references", "deep"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, rel := range []string{"guide.md", "deep/checklist.md"} {
+		if err := os.WriteFile(filepath.Join(dir, "references", filepath.FromSlash(rel)), []byte("内容"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	s, err := Load(Options{ProjectRoot: root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	load := findTool(t, Tools(s), "skill_load")
+	res, err := load.Execute(context.Background(), json.RawMessage(`{"name":"demo"}`), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"references/guide.md", "references/deep/checklist.md", "skill_read_file"} {
+		if !strings.Contains(res.Content, want) {
+			t.Errorf("skill_load 未列出 %s：\n%s", want, res.Content)
+		}
+	}
+}
+
+// 项目内置技能的基本约束：能全部加载、目录不超预算、正文引用的参考文件真实存在。
+func TestProjectSkillsAreConsistent(t *testing.T) {
+	s, err := Load(Options{ProjectRoot: filepath.Join("..", "..", "skills")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.Len() == 0 {
+		t.Fatal("未发现项目技能")
+	}
+	if warns := s.Warnings(); len(warns) > 0 {
+		t.Fatalf("技能加载产生告警：%v", warns)
+	}
+	if prompt := s.CatalogPrompt(); strings.Contains(prompt, "仅列名称") || strings.Contains(prompt, "还有") {
+		t.Errorf("技能目录超出预算被截断，请精简 description/when_to_use：\n%s", prompt)
+	}
+
+	refRe := regexp.MustCompile(`references/[A-Za-z0-9._/-]+\.md`)
+	for _, name := range s.Names() {
+		sk, _ := s.Get(name)
+		if strings.TrimSpace(sk.WhenToUse) == "" {
+			t.Errorf("%s 缺少 when_to_use，模型难以判断适用场景", name)
+		}
+		raw, err := os.ReadFile(filepath.Join(sk.Dir, "SKILL.md"))
+		if err != nil {
+			t.Fatalf("读取 %s 失败: %v", name, err)
+		}
+		for _, rel := range refRe.FindAllString(string(raw), -1) {
+			if _, err := os.Stat(filepath.Join(sk.Dir, filepath.FromSlash(rel))); err != nil {
+				t.Errorf("%s 引用了不存在的参考文件 %s", name, rel)
+			}
+		}
+	}
 }

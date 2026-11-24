@@ -3,8 +3,10 @@ package skills
 import (
 	"context"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"unicode/utf8"
 
@@ -17,6 +19,8 @@ const (
 	defaultReadLines = 200
 	maxReadLines     = 500
 	readTokenBudget  = 8000
+	// maxReferenceList 限制 skill_load 列出的参考文件数，避免目录挤占正文预算。
+	maxReferenceList = 20
 )
 
 // Tools 返回技能相关工具；没有发现技能时返回 nil，避免占用 schema 预算。
@@ -49,6 +53,12 @@ func newLoadTool(s *Store) tools.Tool {
 			}
 			if len(sk.AllowedTools) > 0 {
 				head += "建议工具（仅建议，不强制）：" + strings.Join(sk.AllowedTools, ", ") + "\n"
+			}
+			if refs := listReferences(sk.Dir); len(refs) > 0 {
+				head += "参考文件（正文标注必读或场景命中时，先用 skill_read_file 读取，不要凭记忆猜内容）：\n"
+				for _, ref := range refs {
+					head += "  - " + ref + "\n"
+				}
 			}
 			head += "\n"
 			return tools.Result{
@@ -122,6 +132,29 @@ func newReadTool(s *Store) tools.Tool {
 				Display: fmt.Sprintf("读取 %s/%s（第 %d-%d 行）", name, filepath.ToSlash(rel), page.start, page.end),
 			}, nil
 		})
+}
+
+// listReferences 列出 references/ 下的文本文件，让模型知道有哪些按需参考。
+func listReferences(dir string) []string {
+	root := filepath.Join(dir, "references")
+	var out []string
+	_ = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return nil
+		}
+		rel, err := filepath.Rel(dir, path)
+		if err != nil {
+			return nil
+		}
+		out = append(out, filepath.ToSlash(rel))
+		return nil
+	})
+	sort.Strings(out)
+	if len(out) > maxReferenceList {
+		extra := len(out) - maxReferenceList
+		out = append(out[:maxReferenceList], fmt.Sprintf("…（另有 %d 个文件）", extra))
+	}
+	return out
 }
 
 // skillPath 把相对路径限制在技能目录内。
