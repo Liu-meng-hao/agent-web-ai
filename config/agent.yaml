@@ -5,8 +5,8 @@ models:
     api_key: "${AGENT_API_KEY}"
     model: deepseek-v4.1-flash
     window: 131072
-    # 推理模型的思考 token 也算在 max_tokens 里，8192 在生成大页面时会被思考吃光。
-    max_tokens: 16384
+    # 推理 token 也算在 max_tokens 里；页面分块写入时单块 ≤ 8KB，32k 留足余量。
+    max_tokens: 32768
   summarizer:
     provider: openai
     base_url: "https://infistar.cc/v1"

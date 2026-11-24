@@ -20,6 +20,11 @@ import (
 // ErrMaxSteps 表示达到最大步数仍未收敛。
 var ErrMaxSteps = errors.New("达到最大步数上限，本轮已终止")
 
+// truncationHint 在输出被 max_tokens 截断后注入一次，把纠正措施说清楚：
+// 只说“调大上限”模型仍会整页重试，必须给出可执行的分块方式。
+const truncationHint = "\n\n[上次输出被截断] 上一次回复或工具参数超过输出上限。下一步禁止一次性写整页：" +
+	"先用 artifact_write 的 create 写一个可打开的骨架（content ≤ 8KB），再用 patch 分 2–3 次补齐剩余区块。"
+
 // Recorder 是会话事件记录器（通常由 session.Store 实现）。
 type Recorder interface {
 	Record(session.Event) error
@@ -218,6 +223,10 @@ func (a *Agent) RunTurn(ctx context.Context, input string) (err error) {
 	// 不把它们计入预算，估算就会系统性偏低。
 	overhead := 8 + estimateText(memBlock) + EstimateToolSchemas(a.opts.Registry.Schemas())
 
+	// truncHint 在上一次输出被截断后注入一次，纠正“整页一次写完”的做法；
+	// 只进入下一次请求，不写入会话历史。
+	truncHint := ""
+
 	for step := 1; step <= a.opts.MaxSteps; step++ {
 		steps = step
 		if err := ctx.Err(); err != nil {
@@ -242,9 +251,11 @@ func (a *Agent) RunTurn(ctx context.Context, input string) (err error) {
 			}
 		}
 
+		extra := memBlock + stepHint + truncHint
+		truncHint = ""
 		stream, err := a.opts.Provider.Stream(ctx, llm.Request{
 			Model:     a.opts.Model,
-			Messages:  a.conv.WithSystemExtra(memBlock + stepHint),
+			Messages:  a.conv.WithSystemExtra(extra),
 			Tools:     a.opts.Registry.Schemas(),
 			MaxTokens: a.opts.MaxTokens,
 		})
@@ -308,7 +319,8 @@ func (a *Agent) RunTurn(ctx context.Context, input string) (err error) {
 		if len(calls) == 0 && strings.TrimSpace(text.String()) == "" {
 			if finishReason == "length" {
 				stop = "length"
-				a.notice(fmt.Sprintf("模型输出达到 max_tokens 上限（%d），本轮没有生成可见内容；请调大 models.main.max_tokens 或拆分任务。", a.opts.MaxTokens))
+				truncHint = truncationHint
+				a.notice(fmt.Sprintf("模型输出达到 max_tokens 上限（%d），本轮没有生成可见内容；下一步会要求分块写入，若仍失败请调大 models.main.max_tokens。", a.opts.MaxTokens))
 			} else {
 				stop = "empty"
 				a.notice("模型返回空内容（可能被供应商截断或异常），可以重试。")
@@ -316,7 +328,8 @@ func (a *Agent) RunTurn(ctx context.Context, input string) (err error) {
 			return nil
 		}
 		if finishReason == "length" {
-			a.notice(fmt.Sprintf("模型输出达到 max_tokens 上限（%d），回复或工具参数可能不完整；建议调大 max_tokens 或拆分页面分块写入。", a.opts.MaxTokens))
+			truncHint = truncationHint
+			a.notice(fmt.Sprintf("模型输出达到 max_tokens 上限（%d），回复或工具参数可能不完整；已提示下一步分块写入。", a.opts.MaxTokens))
 		}
 
 		a.conv.Append(llm.Message{

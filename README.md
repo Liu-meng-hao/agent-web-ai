@@ -46,6 +46,8 @@ make test
 
 > 沙箱或 CI 环境里用户目录不可写时，Makefile 已把 `GOPATH` / `GOCACHE` 重定向到工作区 `./.gopath`、`./.gocache`。
 
+MCP 是可选的：需要 Node.js 18+。`config/mcp.yaml` 存在才会连接，模板见 `config/mcp.example.yaml`；不需要时用 `--no-mcp` 跳过。
+
 ## 命令
 
 | 命令 | 说明 |
@@ -69,7 +71,7 @@ make test
 | `agent doctor [--mcp]` | 检查 Go 版本、配置、API key、目录权限、单价覆盖、日志/trace 体积、技能、预览端口、MCP |
 | `agent version` | 版本信息 |
 
-全局参数：`--config <path>`（默认 `config/agent.yaml`）。
+全局参数：`--config <path>`（默认 `config/agent.yaml`）。`run` / `chat` 支持 `--no-mcp` 跳过 MCP 连接。
 
 ## 目录
 
@@ -88,7 +90,7 @@ internal/artifact/  页面写入、自检、预览服务、设计系统 embed
 internal/telemetry/ JSON 日志、turn trace、token/成本记账
 internal/security/  路径 jail、审批策略、受限执行器
 internal/tui/       Bubble Tea 界面
-config/             agent.yaml、pricing.yaml、mcp.example.yaml
+config/             agent.yaml、pricing.yaml、mcp.example.yaml（复制为 mcp.yaml 启用）
 docs/               架构文档
 ```
 
@@ -108,7 +110,7 @@ docs/               架构文档
 | M7 页面（artifact 工具 / 预览服务 / 设计系统 / `web-report`） | ✅ 已完成 |
 | M8 打磨（doctor / 成本 / 日志 / golden 测试 / README） | ✅ 已完成 |
 
-已知简化：工具串行执行、`fs_write` 未做、命令黑名单强制审批未做、TUI 内 `/resume <id>` 暂由 CLI 参数承担、`facts.jsonl` 只追加不压缩、L2 日摘要未做、页面无历史快照。
+已知简化：工具串行执行、`fs_write` 未做、命令黑名单强制审批未做、TUI 内 `/resume <id>` 暂由 CLI 参数承担、`facts.jsonl` 只追加不压缩、L2 日摘要未做、页面无历史快照。页面里的图片目前只能由模型用 CSS/SVG 绘制，不能下载或引用外部图片；可行方案见 [docs/image-assets-feasibility.md](docs/image-assets-feasibility.md)（尚未实施）。
 
 ## 会话
 
@@ -131,9 +133,18 @@ agent replay 01M7VJ28 --from 10 --to 20
 - **手工修正**：直接编辑 `data/memory/MEMORY.md` 的 manual 区，然后 `agent memory rebuild`；运行中的 TUI 里用 `/memory rebuild`。
 - **删除**：`memory_forget(id)` 只置 `archived`，不物理删除。
 
+## MCP 与浏览器
+
+- `config/mcp.yaml` 不存在时 MCP 整体跳过；字段说明见 `config/mcp.example.yaml`。
+- 当前配置接的是 Playwright MCP（`npx @playwright/mcp`，需要 Node.js），让 agent 真实打开页面、读取 DOM/控制台/网络请求，用于模仿站点风格和成品页自检；浏览器跑在 headless 模式，产物写到 `data/artifacts/_mcp`。
+- 浏览器可执行文件启动时自动探测：`CHROME_PATH` → 系统 Chrome → 系统 Edge → Playwright 缓存 → `PATH`，Windows 下转成 8.3 短路径再注入 `--executable-path`，所以本机装了 Chrome/Edge 就不用再装 Playwright 自带的 Chromium；需要固定路径时在 server 下写 `browser_executable`。
+- `tools` 是远端工具白名单，只注册列出的工具以压缩常驻 schema；`tool_approval` 按工具覆盖审批，只读类可设 `auto`，`browser_navigate` / `browser_evaluate` 保持 `ask`。
+- `agent mcp` 查看连接状态与已发现工具；连接失败只降级告警，不影响本地工具。
+
 ## 技能与页面
 
 - 把带 front matter 的 `SKILL.md` 放进 `skills/<name>/` 即生效，无需改代码；TUI 里 `/skill reload` 立即重扫。
+- 当前技能：`web-report`、`skill-creator`、`frontend-design`、`systematic-debugging`、`test-driven-development`、`verification-before-completion`；第三方来源与许可见 `skills/THIRD_PARTY_NOTICES.md`。
 - `artifact_write` 支持 create / replace / patch，写后自检（标签配平、`<html lang>`、外链、占位文案），连续两次阻塞失败才标记 `needs_review`。
 - 预览服务懒启动，只监听 `127.0.0.1`；TUI 里 `/preview` 看地址、`ctrl+o` 打开浏览器。
 
