@@ -149,7 +149,7 @@ func TestToolAdapter(t *testing.T) {
 			"Nested": {"type": "object", "properties": {"value": {"type": "string"}}}
 		}
 	}`)
-	tl := newTool("my server", caller, ToolInfo{Name: "read file/x", Description: "读文件", InputSchema: schema}, "ask", dir)
+	tl := newTool("my server", caller, ToolInfo{Name: "read file/x", Description: "读文件", InputSchema: schema}, "ask", false, dir)
 
 	if tl.Name() != "mcp__my_server__read_file_x" {
 		t.Fatalf("name = %q", tl.Name())
@@ -160,7 +160,7 @@ func TestToolAdapter(t *testing.T) {
 	if tl.DisabledReason() != "" {
 		t.Fatalf("ask 不应被禁用: %q", tl.DisabledReason())
 	}
-	disabled := newTool("s", caller, ToolInfo{Name: "x"}, "deny", dir)
+	disabled := newTool("s", caller, ToolInfo{Name: "x"}, "deny", false, dir)
 	if disabled.DisabledReason() == "" {
 		t.Fatal("approval=deny 应直接禁用")
 	}
@@ -273,7 +273,7 @@ func TestCommandForOSResolvesCmd(t *testing.T) {
 func TestCapResultPreservesUTF8AndOverflow(t *testing.T) {
 	imageDir := filepath.Join(t.TempDir(), "artifacts")
 	overflowDir := filepath.Join(t.TempDir(), "logs")
-	tl := newTool("s", &fakeCaller{}, ToolInfo{Name: "x"}, "ask", imageDir)
+	tl := newTool("s", &fakeCaller{}, ToolInfo{Name: "x"}, "ask", false, imageDir)
 	tl.overflowDir = overflowDir
 	original := strings.Repeat("你", maxResultBytes)
 	got := tl.capResult(original)
@@ -293,14 +293,49 @@ func TestCapResultPreservesUTF8AndOverflow(t *testing.T) {
 func TestAutoRiskUsesAnnotations(t *testing.T) {
 	readOnly := true
 	destructive := true
-	if got := riskForApproval("auto", ToolInfo{}); got != tools.RiskNetwork {
+	if got := riskForApproval("auto", ToolInfo{}, false); got != tools.RiskNetwork {
 		t.Fatalf("未标注工具不应免审批: %v", got)
 	}
-	if got := riskForApproval("auto", ToolInfo{Annotations: ToolAnnotations{ReadOnlyHint: &readOnly}}); got != tools.RiskRead {
+	if got := riskForApproval("auto", ToolInfo{Annotations: ToolAnnotations{ReadOnlyHint: &readOnly}}, false); got != tools.RiskRead {
 		t.Fatalf("显式只读工具应直通: %v", got)
 	}
-	if got := riskForApproval("auto", ToolInfo{Annotations: ToolAnnotations{ReadOnlyHint: &readOnly, DestructiveHint: &destructive}}); got != tools.RiskWrite {
+	if got := riskForApproval("auto", ToolInfo{Annotations: ToolAnnotations{ReadOnlyHint: &readOnly, DestructiveHint: &destructive}}, false); got != tools.RiskWrite {
 		t.Fatalf("破坏性工具必须审批: %v", got)
+	}
+	// tool_approval 的 auto 是人工确认过的单项覆盖，不受注解缺失影响。
+	if got := riskForApproval("auto", ToolInfo{}, true); got != tools.RiskRead {
+		t.Fatalf("单项 auto 应免审批: %v", got)
+	}
+}
+
+func TestToolApprovalOverrideAndWhitelist(t *testing.T) {
+	cfg := config.MCPServer{
+		Approval: "ask",
+		Tools:    []string{"browser_snapshot", "browser_click"},
+		ToolApproval: map[string]string{
+			"browser_snapshot": "auto",
+			"browser_click":    "deny",
+		},
+	}
+	if mode, explicit := cfg.ApprovalFor("browser_snapshot"); mode != "auto" || !explicit {
+		t.Fatalf("ApprovalFor(snapshot) = %q, %v", mode, explicit)
+	}
+	if mode, explicit := cfg.ApprovalFor("other"); mode != "ask" || explicit {
+		t.Fatalf("ApprovalFor(other) = %q, %v", mode, explicit)
+	}
+
+	infos := []ToolInfo{{Name: "browser_snapshot"}, {Name: "browser_click"}, {Name: "browser_type"}}
+	kept, missing := filterInfos(cfg, infos)
+	if len(kept) != 2 || kept[0].Name != "browser_snapshot" || kept[1].Name != "browser_click" {
+		t.Fatalf("kept = %+v", kept)
+	}
+	if len(missing) != 0 {
+		t.Fatalf("missing = %v", missing)
+	}
+
+	_, missing = filterInfos(config.MCPServer{Tools: []string{"browser_snapshot", "browser_missing"}}, infos)
+	if len(missing) != 1 || missing[0] != "browser_missing" {
+		t.Fatalf("missing = %v", missing)
 	}
 }
 

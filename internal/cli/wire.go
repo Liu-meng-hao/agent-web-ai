@@ -380,6 +380,8 @@ func buildAgent(ctx context.Context, cfg *config.Config, role string, approver a
 		if err != nil {
 			warn("MCP 配置不可用，已跳过: " + err.Error())
 		} else if len(mcpCfg.Servers) > 0 {
+			// 浏览器类 server 由启动阶段探测可执行文件，不把本机路径写进配置。
+			applyBrowserExecutable(mcpCfg, warn)
 			warn(fmt.Sprintf("正在连接 %d 个 MCP server；Ctrl+C 可取消，--no-mcp 可跳过", len(mcpCfg.Servers)))
 			mgr := mcp.NewManager(mcpCfg, mcp.Options{
 				ImageDir:    filepath.Join(cwd, "data", "artifacts", "_mcp"),
@@ -482,7 +484,7 @@ func systemPrompt(cwd, workspace string, shell security.Shell, reg *tools.Regist
 	if artifactRoot != "" {
 		fmt.Fprintf(&b, "页面生成：\n")
 		fmt.Fprintf(&b, "- 页面用 artifact_write 写到 %s/<slug>/；新建用 create，整页重写用 replace，局部修改用 patch 并给出唯一 old 片段。\n", artifactRoot)
-		b.WriteString("- 单页超过约 300 行或 12KB 时先 create 完整可打开的骨架，再用 patch 分块补全；每块尽量大，最多 3 次 patch，避免步数耗尽。\n")
+		b.WriteString("- 单次 artifact_write 的 content 必须 ≤ 8KB（约 100 行）：更大的页面先用 create 写可打开的骨架，再用 patch 分 2–3 次补齐；一次塞入整页会触发输出截断，导致工具参数 JSON 不完整而失败。\n")
 		b.WriteString("- 先判断页面类型，不要默认做成数据看板：\n")
 		b.WriteString("  · 数据看板/周报：仅当有真实数据且需要比较、趋势或占比时，使用 KPI 卡片 + 图表 + 表格。\n")
 		b.WriteString("  · 落地页/产品页：首屏价值主张 + 主行动按钮 + 功能与证明，不堆无关指标。\n")

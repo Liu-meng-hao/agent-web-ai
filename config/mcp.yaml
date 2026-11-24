@@ -1,0 +1,40 @@
+# MCP server 配置。文件不存在时 MCP 整体跳过。
+# 当前只接一个浏览器 server：给页面生成做真实渲染验证与风格抓取。
+servers:
+  playwright:
+    transport: stdio
+    command: npx
+    # 浏览器由启动阶段自动探测（系统 Chrome/Edge → Playwright 缓存）。
+    # 需要固定时取消下面这行的注释并填绝对路径，无需再手写 --executable-path。
+    # browser_executable: 'C:\Program Files\Google\Chrome\Application\chrome.exe'
+    args:
+      - "-y"
+      - "@playwright/mcp@0.0.86"
+      - "--headless"
+      # 产物落到统一目录，避免在仓库根生成 .playwright-mcp；每次启动用干净会话。
+      - "--output-dir"
+      - "data/artifacts/_mcp"
+      - "--isolated"
+    approval: ask          # 默认需审批；只读工具由下面的 tool_approval 单独放行
+    timeout: 60s
+    call_timeout: 120s
+    # 只注册这些工具，避免 20+ 个 schema 常驻并稀释工具选择。
+    tools:
+      - browser_navigate
+      - browser_snapshot
+      - browser_take_screenshot
+      - browser_console_messages
+      - browser_network_requests
+      - browser_evaluate
+      - browser_resize
+      - browser_close
+    # 只读类免审批；动作类（navigate / evaluate）仍走 ask。
+    tool_approval:
+      browser_snapshot: auto
+      browser_take_screenshot: auto
+      browser_console_messages: auto
+      browser_network_requests: auto
+      browser_resize: auto
+      browser_close: auto
+      browser_navigate: ask
+      browser_evaluate: ask

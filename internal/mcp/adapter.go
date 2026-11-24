@@ -35,18 +35,22 @@ type tool struct {
 	client      caller
 }
 
-func newTool(server string, client caller, info ToolInfo, approval, imageDir string) *tool {
+func newTool(server string, client caller, info ToolInfo, approval string, explicit bool, imageDir string) *tool {
 	t := &tool{
 		name:     toolName(server, info.Name),
 		remote:   info.Name,
 		desc:     info.Description,
 		schema:   cleanSchema(info.InputSchema),
-		risk:     riskForApproval(approval, info),
+		risk:     riskForApproval(approval, info, explicit),
 		imageDir: imageDir,
 		client:   client,
 	}
 	if approval == "deny" {
-		t.disabled = "server 配置 approval=deny"
+		if explicit {
+			t.disabled = "tool_approval=deny"
+		} else {
+			t.disabled = "server 配置 approval=deny"
+		}
 	}
 	return t
 }
@@ -98,7 +102,12 @@ func sanitize(s string) string {
 	return out
 }
 
-func riskForApproval(approval string, info ToolInfo) tools.Risk {
+func riskForApproval(approval string, info ToolInfo, explicit bool) tools.Risk {
+	// tool_approval 的 auto 是“该工具已确认只读”，直接免审批；
+	// 不走 server 级 auto 的注解推断，否则没有注解的浏览器只读工具仍需审批。
+	if explicit && approval == "auto" {
+		return tools.RiskRead
+	}
 	switch approval {
 	case "auto":
 		a := info.Annotations

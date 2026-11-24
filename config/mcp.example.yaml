@@ -9,6 +9,12 @@ servers:
     approval: ask        # auto | ask | deny；deny 不连接也不注册工具
     timeout: 30s         # initialize + tools/list 的启动超时
     call_timeout: 60s    # 单次 tools/call 超时
+    # tools:             # 远端工具白名单，只注册列出的工具；省略表示全部
+    #   - read_file
+    #   - list_directory
+    # tool_approval:     # 按工具覆盖 approval；auto 仅用于只读工具
+    #   read_file: auto
+    #   write_file: ask
 
   # remote:
   #   transport: http

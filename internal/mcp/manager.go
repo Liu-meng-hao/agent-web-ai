@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 	"sync"
 
 	"agent/internal/config"
@@ -130,13 +131,20 @@ func (m *Manager) startOne(ctx context.Context, s *server) error {
 		m.degrade(s, err)
 		return err
 	}
+	client.MarkReady()
 	for _, warning := range client.Warnings() {
 		m.warn(fmt.Sprintf("MCP server %q：%s", s.name, warning))
 	}
 
+	infos, missing := filterInfos(s.cfg, infos)
+	if len(missing) > 0 {
+		m.warn(fmt.Sprintf("MCP server %q 的 tools 白名单有 %d 项未找到：%s", s.name, len(missing), strings.Join(missing, ", ")))
+	}
+
 	made := make([]tools.Tool, 0, len(infos))
 	for _, info := range infos {
-		t := newTool(s.name, s, info, s.cfg.Approval, m.opts.ImageDir)
+		approval, explicit := s.cfg.ApprovalFor(info.Name)
+		t := newTool(s.name, s, info, approval, explicit, m.opts.ImageDir)
 		t.overflowDir = m.opts.OverflowDir
 		made = append(made, t)
 	}
@@ -148,6 +156,29 @@ func (m *Manager) startOne(ctx context.Context, s *server) error {
 	s.failures = 0
 	s.mu.Unlock()
 	return nil
+}
+
+// filterInfos 按 tools 白名单裁剪远端工具，并返回配置了但远端不存在的名字。
+func filterInfos(cfg config.MCPServer, infos []ToolInfo) (kept []ToolInfo, missing []string) {
+	if len(cfg.Tools) == 0 {
+		return infos, nil
+	}
+	allow := make(map[string]bool, len(cfg.Tools))
+	for _, name := range cfg.Tools {
+		allow[strings.TrimSpace(name)] = true
+	}
+	for _, info := range infos {
+		if !allow[info.Name] {
+			continue
+		}
+		kept = append(kept, info)
+		delete(allow, info.Name)
+	}
+	for name := range allow {
+		missing = append(missing, name)
+	}
+	sort.Strings(missing)
+	return kept, missing
 }
 
 // normalizeToolNames 在全局范围内消除 sanitize 后的同名冲突。
@@ -364,6 +395,12 @@ func (m *Manager) Status() []string {
 		}
 		if s.cfg.Approval == "deny" {
 			line += " · 已禁用，未连接"
+		}
+		if n := len(s.cfg.Tools); n > 0 {
+			line += fmt.Sprintf(" · 白名单 %d 项", n)
+		}
+		if n := len(s.cfg.ToolApproval); n > 0 {
+			line += fmt.Sprintf(" · 单项审批覆盖 %d 项", n)
 		}
 		s.mu.RUnlock()
 		out = append(out, line)

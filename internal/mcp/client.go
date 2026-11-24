@@ -74,6 +74,13 @@ type Client struct {
 
 	warningMu sync.Mutex
 	warnings  []string
+
+	// ready 在首次 tools/list 完成后置位。部分 server（如 Playwright）
+	// 会在握手阶段先发 list_changed，此时工具表本来就还没建立，告警只是噪音。
+	ready atomic.Bool
+	// listChangedSeen 用于吞掉连接后的第一次 list_changed：
+	// Playwright 在浏览器启动后还会补发一次，同样不代表工具表真的变了。
+	listChangedSeen atomic.Bool
 }
 
 // NewClient 建立传输并完成 initialize 握手。
@@ -107,6 +114,9 @@ func NewClient(ctx context.Context, name string, cfg config.MCPServer) (*Client,
 
 // Name 返回 server 名。
 func (c *Client) Name() string { return c.name }
+
+// MarkReady 标记首次工具发现完成，之后的 list_changed 才需要提示。
+func (c *Client) MarkReady() { c.ready.Store(true) }
 
 // SetNoticeHandler 设置异步通知接收器，可在启动后立即调用。
 func (c *Client) SetNoticeHandler(handler func(string)) {
@@ -259,6 +269,10 @@ func (c *Client) handleNotification(req *rpcRequest) {
 		raw, _ := json.Marshal(req.Params)
 		handler(fmt.Sprintf("MCP server %q 消息：%s", c.name, raw))
 	case "notifications/tools/list_changed":
+		// 启动阶段与首次 list_changed 属于正常握手，不提示。
+		if !c.ready.Load() || !c.listChangedSeen.Swap(true) {
+			return
+		}
 		handler(fmt.Sprintf("MCP server %q 的工具列表已变化；当前工具表不会自动刷新", c.name))
 	}
 }
