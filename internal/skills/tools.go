@@ -1,6 +1,7 @@
 package skills
 
 import (
+	"bufio"
 	"context"
 	"fmt"
 	"io/fs"
@@ -15,12 +16,16 @@ import (
 )
 
 const (
-	maxReadFileBytes = 256 << 10
+	// maxScanLineBytes 是单行上限；超过文件总大小不再直接拒绝，分页即可读取。
+	maxScanLineBytes = 1 << 20
 	defaultReadLines = 200
 	maxReadLines     = 500
-	readTokenBudget  = 8000
+	// readTokenBudget 是默认的单次读取预算；Store 配置了 MaxBodyTokens 时以配置为准。
+	readTokenBudget = 8000
 	// maxReferenceList 限制 skill_load 列出的参考文件数，避免目录挤占正文预算。
 	maxReferenceList = 20
+	// maxScanFiles 限制目录遍历的规模，避免技能目录里塞了大目录时拖慢 skill_load。
+	maxScanFiles = 200
 )
 
 // Tools 返回技能相关工具；没有发现技能时返回 nil，避免占用 schema 预算。
@@ -55,7 +60,7 @@ func newLoadTool(s *Store) tools.Tool {
 				head += "建议工具（仅建议，不强制）：" + strings.Join(sk.AllowedTools, ", ") + "\n"
 			}
 			if refs := listReferences(sk.Dir); len(refs) > 0 {
-				head += "参考文件（正文标注必读或场景命中时，先用 skill_read_file 读取，不要凭记忆猜内容）：\n"
+				head += "参考文件（正文标注必读或场景命中时先用 skill_read_file 读取，不要凭记忆猜内容；path 传目录可列出该目录全部文件）：\n"
 				for _, ref := range refs {
 					head += "  - " + ref + "\n"
 				}
@@ -76,7 +81,8 @@ type readFileInput struct {
 }
 
 func newReadTool(s *Store) tools.Tool {
-	return tools.Define("skill_read_file", "读取技能目录内的参考文件或脚本。只能读取该技能自己的目录，不能访问项目其他路径。", tools.RiskRead,
+	budget := s.BodyTokenBudget()
+	return tools.Define("skill_read_file", "读取技能目录内的参考文件、脚本或 SKILL.md 正文；path 指向目录时列出该目录下的文件。只能读取该技能自己的目录，不能访问项目其他路径。", tools.RiskRead,
 		func(ctx context.Context, in readFileInput, tc *tools.CallContext) (tools.Result, error) {
 			name := strings.TrimSpace(in.Name)
 			rel := strings.TrimSpace(in.Path)
@@ -96,17 +102,10 @@ func newReadTool(s *Store) tools.Tool {
 				return tools.Result{Content: fmt.Sprintf("文件不存在：%s", rel)}, nil
 			}
 			if info.IsDir() {
-				return tools.Result{Content: fmt.Sprintf("%s 是目录，请指定文件", rel)}, nil
-			}
-			if info.Size() > maxReadFileBytes {
-				return tools.Result{Content: fmt.Sprintf("文件超过 %d KiB，当前只支持读取较小的参考文件", maxReadFileBytes>>10)}, nil
-			}
-			raw, err := os.ReadFile(path)
-			if err != nil {
-				return tools.Result{Content: "读取失败：" + err.Error()}, nil
-			}
-			if !utf8.Valid(raw) {
-				return tools.Result{Content: fmt.Sprintf("%s 不是 UTF-8 文本，无法直接展示", rel)}, nil
+				return tools.Result{
+					Content: listDir(path, rel),
+					Display: "列出目录 " + filepath.ToSlash(rel),
+				}, nil
 			}
 			offset := in.Offset
 			if offset <= 0 {
@@ -119,7 +118,7 @@ func newReadTool(s *Store) tools.Tool {
 			if limit > maxReadLines {
 				limit = maxReadLines
 			}
-			page, err := readLineRange(string(raw), offset, limit)
+			page, err := readLineRangeFile(path, rel, offset, limit, budget)
 			if err != nil {
 				return tools.Result{Content: err.Error()}, nil
 			}
@@ -134,27 +133,107 @@ func newReadTool(s *Store) tools.Tool {
 		})
 }
 
-// listReferences 列出 references/ 下的文本文件，让模型知道有哪些按需参考。
-func listReferences(dir string) []string {
-	root := filepath.Join(dir, "references")
-	var out []string
-	_ = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
-		if err != nil || d.IsDir() {
-			return nil
+// listDir 列出技能目录下的条目，供模型发现 references 清单之外的文件。
+func listDir(dir, rel string) string {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return "读取目录失败：" + err.Error()
+	}
+	if len(entries) == 0 {
+		return filepath.ToSlash(rel) + " 是空目录"
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "%s 下的文件（%d 项）：\n", filepath.ToSlash(rel), len(entries))
+	const maxEntries = 100
+	for i, e := range entries {
+		if i >= maxEntries {
+			fmt.Fprintf(&b, "…（另有 %d 项，请缩小目录范围）\n", len(entries)-maxEntries)
+			break
 		}
-		rel, err := filepath.Rel(dir, path)
+		name := e.Name()
+		if e.IsDir() {
+			name += "/"
+		}
+		b.WriteString("  - " + name + "\n")
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
+
+// listReferences 列出技能目录内可供按需读取的文件，让模型知道正文之外还有哪些资料。
+// 覆盖整个技能目录（跳过 SKILL.md 与隐藏文件），每条附首行摘要；超出上限时提示用目录列举查看。
+func listReferences(dir string) []string {
+	var paths []string
+	_ = filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return nil
 		}
-		out = append(out, filepath.ToSlash(rel))
+		name := d.Name()
+		if d.IsDir() {
+			if path != dir && strings.HasPrefix(name, ".") {
+				return fs.SkipDir
+			}
+			return nil
+		}
+		if strings.HasPrefix(name, ".") {
+			return nil
+		}
+		rel, relErr := filepath.Rel(dir, path)
+		if relErr != nil {
+			return nil
+		}
+		rel = filepath.ToSlash(rel)
+		if rel == "SKILL.md" {
+			return nil
+		}
+		if len(paths) >= maxScanFiles {
+			return fs.SkipAll
+		}
+		paths = append(paths, rel)
 		return nil
 	})
-	sort.Strings(out)
-	if len(out) > maxReferenceList {
-		extra := len(out) - maxReferenceList
-		out = append(out[:maxReferenceList], fmt.Sprintf("…（另有 %d 个文件）", extra))
+	sort.Strings(paths)
+	out := make([]string, 0, min(len(paths), maxReferenceList))
+	for i, rel := range paths {
+		if i >= maxReferenceList {
+			out = append(out, fmt.Sprintf("…（另有 %d 个文件；把子目录路径传给 skill_read_file 可查看完整列表）", len(paths)-maxReferenceList))
+			break
+		}
+		line := rel
+		if sum := fileSummary(filepath.Join(dir, filepath.FromSlash(rel))); sum != "" {
+			line += "（" + sum + "）"
+		}
+		out = append(out, line)
 	}
 	return out
+}
+
+// fileSummary 取文件首个非空行作为一句话摘要，避免一次性读取正文。
+func fileSummary(path string) string {
+	f, err := os.Open(path)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+	buf := make([]byte, 4096)
+	n, _ := f.Read(buf)
+	if n <= 0 {
+		return ""
+	}
+	for _, line := range strings.Split(string(buf[:n]), "\n") {
+		line = strings.TrimSpace(strings.TrimLeft(line, "#"))
+		if line == "" {
+			continue
+		}
+		if strings.ContainsRune(line, 0) {
+			return ""
+		}
+		line = strings.ToValidUTF8(line, "")
+		if r := []rune(line); len(r) > 40 {
+			return string(r[:40]) + "…"
+		}
+		return line
+	}
+	return ""
 }
 
 // skillPath 把相对路径限制在技能目录内。
@@ -179,50 +258,78 @@ type linePage struct {
 	total, next int
 }
 
-// readLineRange 按行分页，并保证单次输出不超过 readTokenBudget。
-func readLineRange(content string, offset, limit int) (linePage, error) {
-	content = strings.ReplaceAll(content, "\r\n", "\n")
-	content = strings.TrimSuffix(content, "\n")
-	lines := strings.Split(content, "\n")
-	if len(lines) == 1 && lines[0] == "" {
-		return linePage{}, fmt.Errorf("文件为空")
+// readLineRangeFile 流式按行分页读取文件：大文件不需要整体载入内存，也不会因总大小被拒绝。
+// budget 为单次返回的 token 上限，缺省取 readTokenBudget。
+func readLineRangeFile(path, rel string, offset, limit, budget int) (linePage, error) {
+	if budget <= 0 {
+		budget = readTokenBudget
 	}
-	if offset > len(lines) {
-		return linePage{}, fmt.Errorf("offset %d 超出文件行数 %d", offset, len(lines))
+	f, err := os.Open(path)
+	if err != nil {
+		return linePage{}, fmt.Errorf("读取失败：%w", err)
 	}
-	start := offset - 1
-	end := start
-	used := 0
+	defer f.Close()
+
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 0, 64<<10), maxScanLineBytes)
+
 	var out strings.Builder
+	used := 0
+	lineNo := 0
+	end := offset - 1
+	closed := false
 	truncatedLine := false
-	for i := start; i < len(lines) && i-start < limit; i++ {
-		num := fmt.Sprintf("%5d | ", i+1)
-		cost := estimateTokens(num) + estimateTokens(lines[i])
-		if used+cost > readTokenBudget {
-			if i == start {
-				remain := readTokenBudget - used - estimateTokens(num) - 2
+
+	for sc.Scan() {
+		lineNo++
+		line := strings.TrimSuffix(sc.Text(), "\r")
+		if !utf8.ValidString(line) {
+			return linePage{}, fmt.Errorf("%s 不是 UTF-8 文本，无法直接展示", rel)
+		}
+		if lineNo < offset || closed {
+			continue
+		}
+		if lineNo-offset >= limit {
+			closed = true
+			continue
+		}
+		num := fmt.Sprintf("%5d | ", lineNo)
+		cost := estimateTokens(num) + estimateTokens(line)
+		if used+cost > budget {
+			if lineNo == offset {
+				remain := budget - used - estimateTokens(num) - 2
 				if remain < 1 {
 					remain = 1
 				}
-				trimmed, _ := trimToTokens(lines[i], remain)
+				trimmed, _ := trimToTokens(line, remain)
 				out.WriteString(num + trimmed + "\n")
-				out.WriteString("…（本行过长已截断，剩余部分请用 fs_read 查看）\n")
+				out.WriteString("…（本行过长已截断，无法按 offset 续读；如需完整内容请用 shell 查看该文件）\n")
 				truncatedLine = true
-				end = i + 1
+				end = lineNo
 			}
-			break
+			closed = true
+			continue
 		}
-		out.WriteString(num + lines[i] + "\n")
+		out.WriteString(num + line + "\n")
 		used += cost
-		end = i + 1
+		end = lineNo
+	}
+	if err := sc.Err(); err != nil {
+		return linePage{}, fmt.Errorf("读取失败（单行可能超过 %d KiB）：%w", maxScanLineBytes>>10, err)
+	}
+	if lineNo == 0 {
+		return linePage{}, fmt.Errorf("文件为空")
+	}
+	if offset > lineNo {
+		return linePage{}, fmt.Errorf("offset %d 超出文件行数 %d", offset, lineNo)
 	}
 	page := linePage{
 		text:  strings.TrimRight(out.String(), "\n"),
 		start: offset,
 		end:   end,
-		total: len(lines),
+		total: lineNo,
 	}
-	if !truncatedLine && end < len(lines) {
+	if !truncatedLine && end < lineNo {
 		page.next = end + 1
 	}
 	return page, nil

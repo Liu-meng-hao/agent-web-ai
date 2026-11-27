@@ -63,6 +63,7 @@ type Store struct {
 	order         []string
 	warnings      []string
 	maxCatalogTok int
+	maxBodyTok    int
 }
 
 // Load 扫描项目与用户技能目录。
@@ -75,7 +76,7 @@ func Load(opts Options) (*Store, error) {
 	if opts.MaxCatalogTokens <= 0 {
 		opts.MaxCatalogTokens = defaultMaxCatalogTokens
 	}
-	s := &Store{skills: map[string]*Skill{}, maxCatalogTok: opts.MaxCatalogTokens}
+	s := &Store{skills: map[string]*Skill{}, maxCatalogTok: opts.MaxCatalogTokens, maxBodyTok: opts.MaxBodyTokens}
 	roots := []struct {
 		path   string
 		source string
@@ -234,7 +235,7 @@ func truncateTokens(body string, limit int) (string, bool) {
 		}
 		if (ascii+3)/4+other > limit {
 			return strings.TrimRight(body[:i], " \n") +
-				"\n\n…（正文超过 " + fmt.Sprint(limit) + " token 已截断，完整内容请用 skill_read_file 按 offset/limit 分段读取）", true
+				"\n\n…（正文超过 " + fmt.Sprint(limit) + " token 已截断，完整内容请用 skill_read_file 读取 path=\"SKILL.md\"，按 offset/limit 分段）", true
 		}
 	}
 	return body, false
@@ -314,6 +315,31 @@ func (s *Store) Body(name string) (string, bool) {
 	return sk.body, true
 }
 
+// BodyTokenBudget 返回单次加载正文的 token 预算，供 skill_read_file 共用。
+func (s *Store) BodyTokenBudget() int {
+	if s.maxBodyTok > 0 {
+		return s.maxBodyTok
+	}
+	return defaultMaxBodyTokens
+}
+
+// FullBody 重新从磁盘读取未截断的正文，供 /skill show 展示完整内容。
+func (s *Store) FullBody(name string) (string, bool) {
+	sk, ok := s.Get(name)
+	if !ok {
+		return "", false
+	}
+	raw, err := os.ReadFile(filepath.Join(sk.Dir, "SKILL.md"))
+	if err != nil {
+		return "", false
+	}
+	_, body, ok := splitFrontMatter(string(raw))
+	if !ok {
+		return "", false
+	}
+	return strings.TrimSpace(body), true
+}
+
 // CatalogLines 返回 /skill 面板用的技能列表。
 func (s *Store) CatalogLines() []string {
 	out := make([]string, 0, len(s.order))
@@ -329,7 +355,7 @@ func (s *Store) CatalogLines() []string {
 }
 
 // CatalogPrompt 生成注入 system prompt 的紧凑目录；没有技能时返回空串。
-// 超过预算时先保留完整条目，再退化为仅列名称，仍超限则截断并提示 /skill。
+// 超过预算时依次降级：完整条目 → 技能名 + 适用场景 → 仅名称，仍超限则截断并提示 /skill。
 func (s *Store) CatalogPrompt() string {
 	if len(s.order) == 0 {
 		return ""
@@ -338,10 +364,17 @@ func (s *Store) CatalogPrompt() string {
 	var b strings.Builder
 	b.WriteString(header)
 	used := estimateTokens(header)
-	compact := false
+
+	const (
+		modeFull = iota
+		modeBrief
+		modeNames
+	)
+	mode := modeFull
 	for i, name := range s.order {
 		sk := s.skills[name]
-		if !compact {
+		switch mode {
+		case modeFull:
 			entry := fmt.Sprintf("- %s：%s", sk.Name, sk.Description)
 			if sk.WhenToUse != "" {
 				entry += "（适用：" + sk.WhenToUse + "）"
@@ -352,22 +385,58 @@ func (s *Store) CatalogPrompt() string {
 				used += estimateTokens(entry)
 				continue
 			}
-			compact = true
-			hint := "（目录超出预算，以下仅列名称，详情用 /skill 查看）\n"
-			if used+estimateTokens(hint) > s.maxCatalogTok {
-				fmt.Fprintf(&b, "…（还有 %d 个技能，用 /skill 查看）\n", len(s.order)-i)
-				break
+			mode = modeBrief
+			if !writeCatalogHint(&b, &used, s.maxCatalogTok,
+				"（目录超出预算，以下为精简条目：技能名 + 适用场景，详情用 /skill 查看）\n", len(s.order)-i) {
+				return b.String()
 			}
-			b.WriteString(hint)
-			used += estimateTokens(hint)
+			fallthrough
+		case modeBrief:
+			entry := "- " + sk.Name
+			if trig := truncateRunes(sk.WhenToUse, 24); trig != "" {
+				entry += "：" + trig
+			}
+			entry += "\n"
+			if used+estimateTokens(entry) <= s.maxCatalogTok {
+				b.WriteString(entry)
+				used += estimateTokens(entry)
+				continue
+			}
+			mode = modeNames
+			if !writeCatalogHint(&b, &used, s.maxCatalogTok,
+				"（目录超出预算，以下仅列名称）\n", len(s.order)-i) {
+				return b.String()
+			}
+			fallthrough
+		case modeNames:
+			entry := "- " + sk.Name + "\n"
+			if used+estimateTokens(entry) > s.maxCatalogTok {
+				fmt.Fprintf(&b, "…（还有 %d 个技能，用 /skill 查看）\n", len(s.order)-i)
+				return b.String()
+			}
+			b.WriteString(entry)
+			used += estimateTokens(entry)
 		}
-		entry := "- " + sk.Name + "\n"
-		if used+estimateTokens(entry) > s.maxCatalogTok {
-			fmt.Fprintf(&b, "…（还有 %d 个技能，用 /skill 查看）\n", len(s.order)-i)
-			break
-		}
-		b.WriteString(entry)
-		used += estimateTokens(entry)
 	}
 	return b.String()
+}
+
+// writeCatalogHint 在预算内写入降级提示；放不下时改写“还有 N 个技能”并返回 false。
+func writeCatalogHint(b *strings.Builder, used *int, budget int, hint string, remaining int) bool {
+	if *used+estimateTokens(hint) > budget {
+		fmt.Fprintf(b, "…（还有 %d 个技能，用 /skill 查看）\n", remaining)
+		return false
+	}
+	b.WriteString(hint)
+	*used += estimateTokens(hint)
+	return true
+}
+
+// truncateRunes 截断到 n 个字符，并去掉尾部标点。
+func truncateRunes(s string, n int) string {
+	r := []rune(strings.TrimSpace(s))
+	if len(r) <= n {
+		return string(r)
+	}
+	return strings.TrimRight(string(r[:n]), "，。；;、 ") + "…"
 }

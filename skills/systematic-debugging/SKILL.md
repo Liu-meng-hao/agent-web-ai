@@ -1,7 +1,7 @@
 ---
 name: systematic-debugging
-description: 遇到 bug、测试失败或异常行为时，先定位根因再改代码的系统化排查流程
-when_to_use: 出现构建失败、测试失败、运行时报错、行为不符合预期，或准备先试一下时
+description: 遇到 bug、测试失败、性能退化或异常行为时，先定位根因再改代码的系统化排查流程
+when_to_use: 出现构建失败、测试失败、运行时报错、性能退化（越调越慢、指标与预期相反）、行为不符合预期，或准备先试一下时
 version: 0.1.0
 allowed-tools: [fs_read, fs_list, shell, skill_read_file]
 license: MIT

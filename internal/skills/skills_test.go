@@ -409,3 +409,82 @@ func TestProjectSkillsAreConsistent(t *testing.T) {
 		}
 	}
 }
+
+// 大文件不应因总大小被拒绝：分页必须能读到指定区间。
+func TestReadLargeFileByPage(t *testing.T) {
+	root := t.TempDir()
+	dir := writeSkill(t, root, "demo", demoSkill)
+	var lines []string
+	for i := 1; i <= 5000; i++ {
+		lines = append(lines, fmt.Sprintf("第 %d 行 %s", i, strings.Repeat("内容", 10)))
+	}
+	big := filepath.Join(dir, "references", "big.md")
+	if err := os.WriteFile(big, []byte(strings.Join(lines, "\n")), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(big)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Size() <= 256<<10 {
+		t.Fatalf("测试文件应大于 256KiB，实际 %d", info.Size())
+	}
+	s, _ := Load(Options{ProjectRoot: root})
+	read := findTool(t, Tools(s), "skill_read_file")
+	res, _ := read.Execute(context.Background(), json.RawMessage(`{"name":"demo","path":"references/big.md","offset":4000,"limit":2}`), nil)
+	if !strings.Contains(res.Content, "第 4000 行") || !strings.Contains(res.Content, "第 4001 行") {
+		t.Fatalf("大文件分页 = %s", res.Content)
+	}
+}
+
+// path 指向目录时应列出内容，便于发现未出现在清单里的文件。
+func TestReadFileListsDirectory(t *testing.T) {
+	root := t.TempDir()
+	dir := writeSkill(t, root, "demo", demoSkill)
+	if err := os.MkdirAll(filepath.Join(dir, "docs"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "docs", "api.md"), []byte("接口说明"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s, _ := Load(Options{ProjectRoot: root})
+	read := findTool(t, Tools(s), "skill_read_file")
+	res, _ := read.Execute(context.Background(), json.RawMessage(`{"name":"demo","path":"docs"}`), nil)
+	if !strings.Contains(res.Content, "api.md") {
+		t.Fatalf("目录列举 = %s", res.Content)
+	}
+}
+
+// 正文截断时必须给出可执行的续读路径。
+func TestTruncatedBodyHintsSkillPath(t *testing.T) {
+	root := t.TempDir()
+	body := "---\nname: big\ndescription: 大正文\n---\n" + strings.Repeat("很长的正文", 200)
+	writeSkill(t, root, "big", body)
+	s, _ := Load(Options{ProjectRoot: root, MaxBodyTokens: 50})
+	load := findTool(t, Tools(s), "skill_load")
+	res, _ := load.Execute(context.Background(), json.RawMessage(`{"name":"big"}`), nil)
+	if !strings.Contains(res.Content, `path="SKILL.md"`) {
+		t.Fatalf("截断提示缺少续读路径 = %s", res.Content)
+	}
+}
+
+// 参考文件清单应覆盖 references/ 之外的目录，并附首行摘要；不列 SKILL.md 自身。
+func TestReferencesCoverWholeDir(t *testing.T) {
+	root := t.TempDir()
+	dir := writeSkill(t, root, "demo", demoSkill)
+	if err := os.MkdirAll(filepath.Join(dir, "docs"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "docs", "api.md"), []byte("# 接口约定\n正文"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s, _ := Load(Options{ProjectRoot: root})
+	load := findTool(t, Tools(s), "skill_load")
+	res, _ := load.Execute(context.Background(), json.RawMessage(`{"name":"demo"}`), nil)
+	if !strings.Contains(res.Content, "docs/api.md") || !strings.Contains(res.Content, "接口约定") {
+		t.Fatalf("清单未覆盖 docs/ 或缺少摘要 = %s", res.Content)
+	}
+	if strings.Contains(res.Content, "SKILL.md（") {
+		t.Fatalf("清单不应包含 SKILL.md 自身 = %s", res.Content)
+	}
+}

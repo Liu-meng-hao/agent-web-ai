@@ -1,7 +1,7 @@
 ---
 name: verification-before-completion
-description: 在声称完成、修复或通过之前，必须先运行验证命令并核对输出证据
-when_to_use: 准备说已完成、已修复、测试通过，或提交代码、结束任务、汇报状态之前
+description: 在任何对外声称完成、修复、通过或汇报状态之前，先运行验证命令并核对本次输出的证据
+when_to_use: 准备说已完成、已修复、测试通过，或提交代码、结束任务、汇报任何进展之前（不限于跑测试）
 version: 0.1.0
 allowed-tools: [shell, fs_read, fs_list]
 license: MIT
